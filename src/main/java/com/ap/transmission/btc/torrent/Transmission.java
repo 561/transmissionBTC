@@ -199,6 +199,7 @@ public class Transmission {
 			torrentFs = new TorrentFs(this, session);
 
 			startWatchers();
+			startPeerWatchdog();
 			startUpnp();
 			if (hasDownloadingTorrents()) wakeLock();
 
@@ -233,6 +234,12 @@ public class Transmission {
 				}, interval, interval, TimeUnit.SECONDS);
 			}
 		}
+	}
+
+	private void startPeerWatchdog() {
+		PeerWatchdog watchdog = new PeerWatchdog(this, prefs);
+		getScheduler().scheduleWithFixedDelay(watchdog::check, PeerWatchdog.CHECK_PERIOD_SEC,
+				PeerWatchdog.CHECK_PERIOD_SEC, TimeUnit.SECONDS);
 	}
 
 	private void startWatcher(String watchDir, String downloadDir) {

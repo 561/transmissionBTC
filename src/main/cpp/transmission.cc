@@ -48,7 +48,15 @@ static void metadataFunc(tr_torrent *torrent, void *user_data) {
   callAddedOrChangedCallback();
 }
 
-static tr_rpc_callback_status rpcFunc(tr_session *__unused session, tr_rpc_callback_type type,
+static void saveSessionSettings(tr_session *session) {
+  tr_variant settings;
+  tr_variantInitDict(&settings, 0);
+  tr_sessionGetSettings(session, &settings);
+  tr_sessionSaveSettings(session, tr_sessionGetConfigDir(session), &settings);
+  tr_variantFree(&settings);
+}
+
+static tr_rpc_callback_status rpcFunc(tr_session *session, tr_rpc_callback_type type,
                                       struct tr_torrent *tor,
                                       void *__unused user_data) {
   switch (type) {
@@ -75,7 +83,9 @@ static tr_rpc_callback_status rpcFunc(tr_session *__unused session, tr_rpc_callb
     case TR_RPC_TORRENT_REMOVING:
     case TR_RPC_TORRENT_TRASHING:
       callStoppedCallback();
+      break;
     case TR_RPC_SESSION_CHANGED:
+      saveSessionSettings(session);
       callSessionChangedCallback();
       break;
     default:
