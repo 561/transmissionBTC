@@ -45,6 +45,8 @@ public class IdleStateReceiver extends BroadcastReceiver {
     String action = intent.getAction();
     if (action == null) return;
 
+    boolean wasIdle = isIdle();
+
     switch (action) {
       case Intent.ACTION_DREAMING_STARTED:
         dreaming = true;
@@ -63,6 +65,6 @@ public class IdleStateReceiver extends BroadcastReceiver {
     }
 
     Transmission tr = TransmissionService.getTransmission();
-    if ((tr != null) && tr.isRunning()) tr.updateAutoSuspend();
+    if ((tr != null) && tr.isRunning()) tr.onIdleStateChanged(wasIdle != isIdle());
   }
 }

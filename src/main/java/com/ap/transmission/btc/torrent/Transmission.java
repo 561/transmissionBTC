@@ -28,6 +28,7 @@ import com.ap.transmission.btc.StorageAccess;
 import com.ap.transmission.btc.Utils;
 import com.ap.transmission.btc.func.Promise;
 import com.ap.transmission.btc.http.HttpServer;
+import com.ap.transmission.btc.http.IdleControlServer;
 import com.ap.transmission.btc.http.SimpleHttpServer;
 import com.ap.transmission.btc.receivers.ConnectivityChangeReceiver;
 import com.ap.transmission.btc.receivers.IdleStateReceiver;
@@ -62,6 +63,9 @@ public class Transmission {
 	private static final byte STATE_STOPPING = 4;
 	private static final byte STATE_SUSPENDED = 8;
 	private static final byte STATE_SUSPENDED_BY_USER = 16;
+	public static final int OVERRIDE_AUTO = 0;
+	public static final int OVERRIDE_RUN = 1;
+	public static final int OVERRIDE_PAUSE = 2;
 	private static final String TAG = Transmission.class.getName();
 	private static final String SETTINGS_FILE = "settings.json";
 	private final ReadWriteLock lock = new ReentrantReadWriteLock();
@@ -71,6 +75,8 @@ public class Transmission {
 	private SsdpServer ssdpServer;
 	private volatile List<Long> semaphores;
 	private volatile HttpServer httpServer;
+	private volatile IdleControlServer idleControlServer;
+	private volatile int idleOverride = OVERRIDE_AUTO;
 	private volatile TorrentFs torrentFs;
 	private volatile ExecutorService executor;
 	private volatile ScheduledExecutorService scheduler;
@@ -170,6 +176,13 @@ public class Transmission {
 				suspend |= !IdleStateReceiver.isIdle();
 			}
 
+			try {
+				idleControlServer = new IdleControlServer(this);
+				idleControlServer.start();
+			} catch (IOException ex) {
+				err(TAG, ex, "Failed to start the idle control server");
+			}
+
 			Native.envSet("TMP", tmp.getAbsolutePath());
 			Native.envSet("TRANSMISSION_WEB_HOME", webDir.getAbsolutePath());
 			increaseSoBuf();
@@ -264,6 +277,8 @@ public class Transmission {
 				if (watchers != null) for (Watcher w : watchers) w.stopWatching();
 				ConnectivityChangeReceiver.unregister(getContext());
 				IdleStateReceiver.unregister(getContext());
+				Utils.close(idleControlServer);
+				idleControlServer = null;
 				Native.transmissionSetRpcCallbacks(null, null, null, null);
 				Utils.close(httpServer, ssdpServer);
 				stopExecutor();
@@ -351,9 +366,32 @@ public class Transmission {
 		if (!isRunning() || isSuspendedByUser()) return;
 		boolean networkBlocked = prefs.isWifiEthOnly()
 				&& !Utils.isWifiEthActive(getContext(), prefs.getWifiSsid());
-		boolean busy = prefs.isIdleOnly() && !IdleStateReceiver.isIdle();
-		boolean suspend = networkBlocked || busy;
+		boolean busy = prefs.isIdleOnly() && !IdleStateReceiver.isIdle()
+				&& idleOverride != OVERRIDE_RUN;
+		boolean suspend = idleOverride == OVERRIDE_PAUSE || networkBlocked || busy;
 		if (suspend != isSuspended()) suspend(suspend, false, null);
+	}
+
+	public void onIdleStateChanged(boolean idleChanged) {
+		if (idleChanged && idleOverride == OVERRIDE_RUN) idleOverride = OVERRIDE_AUTO;
+		updateAutoSuspend();
+	}
+
+	public void setIdleOverride(int mode) {
+		idleOverride = mode;
+		updateAutoSuspend();
+	}
+
+	public String getIdleStatusJson() {
+		boolean suspended = isRunning() && isSuspended();
+		String override = idleOverride == OVERRIDE_RUN ? "run" : idleOverride == OVERRIDE_PAUSE ? "pause" : "auto";
+		String reason = !suspended ? "downloading"
+				: isSuspendedByUser() ? "user"
+				: idleOverride == OVERRIDE_PAUSE ? "forced"
+				: (prefs.isIdleOnly() && !IdleStateReceiver.isIdle()) ? "busy" : "network";
+		return "{\"running\":" + isRunning() + ",\"idleOnly\":" + prefs.isIdleOnly()
+				+ ",\"idle\":" + IdleStateReceiver.isIdle() + ",\"suspended\":" + suspended
+				+ ",\"override\":\"" + override + "\",\"reason\":\"" + reason + "\"}";
 	}
 
 	public boolean isSuspended() {

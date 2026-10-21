@@ -1,84 +1,167 @@
 diff --git a/libtransmission/inout.cc b/libtransmission/inout.cc
-index ec3e398e..20f0f18b 100644
+index ec3e398e..cb15db5f 100644
 --- a/libtransmission/inout.cc
 +++ b/libtransmission/inout.cc
-@@ -7,9 +7,13 @@
+@@ -7,9 +7,14 @@
   */
  
  #include <algorithm>
 +#include <atomic>
  #include <cerrno>
  #include <cstdlib> /* bsearch() */
++#include <cstdio>
  #include <cstring> /* memcmp() */
++#include <chrono>
 +#include <thread>
 +
-+#include <unistd.h>
  
  #include "transmission.h"
  #include "cache.h" /* tr_cacheReadBlock() */
-@@ -37,6 +41,45 @@ enum
+@@ -18,6 +23,7 @@
+ #include "fdlimit.h"
+ #include "file.h"
+ #include "inout.h"
++#include "trevent.h"
+ #include "log.h"
+ #include "peer-common.h" /* MAX_BLOCK_SIZE */
+ #include "stats.h" /* tr_statsFileCreated() */
+@@ -37,6 +43,106 @@ enum
      TR_IO_WRITE
  };
  
-+static uint64_t constexpr SYNC_WRITES_THRESHOLD = 2 * 1048576;
++static std::atomic<bool> downloadThrottled{ false };
++static std::atomic<tr_session*> throttleSession{ nullptr };
++static std::atomic<bool> monitorStarted{ false };
 +
-+static std::atomic<bool> syncInFlight{ false };
-+
-+static bool syncFileAsync(tr_sys_file_t fd)
++static uint64_t maxDirtyBytes()
 +{
-+    bool expected = false;
-+
-+    if (!syncInFlight.compare_exchange_strong(expected, true))
-+    {
-+        return false;
-+    }
-+
-+    int const copy = dup(fd);
-+
-+    if (copy < 0)
-+    {
-+        syncInFlight = false;
-+        return false;
-+    }
-+
-+    std::thread([copy]() {
-+        fsync(copy);
-+        close(copy);
-+        syncInFlight = false;
-+    }).detach();
-+
-+    return true;
++    static uint64_t const value = []() {
++        char const* env = getenv("TRANSMISSION_MAX_DIRTY_MB");
++        long const mb = env != nullptr ? atol(env) : 32;
++        return static_cast<uint64_t>(mb > 0 ? mb : 32) * 1048576;
++    }();
++    return value;
 +}
 +
-+static bool syncWritesEnabled()
++static uint64_t readDirtyBytes()
 +{
-+    static bool const enabled = []() {
-+        char const* env = getenv("TRANSMISSION_SYNC_WRITES");
-+        return env == nullptr || env[0] != '0';
-+    }();
-+    return enabled;
++    FILE* f = fopen("/proc/meminfo", "r");
++
++    if (f == nullptr)
++    {
++        return 0;
++    }
++
++    char line[128];
++    uint64_t total = 0;
++
++    while (fgets(line, sizeof(line), f) != nullptr)
++    {
++        unsigned long long kb = 0;
++
++        if (sscanf(line, "Dirty: %llu kB", &kb) == 1 || sscanf(line, "Writeback: %llu kB", &kb) == 1)
++        {
++            total += kb * 1024;
++        }
++    }
++
++    fclose(f);
++    return total;
++}
++
++static void refreshDownloadLimit(void* vsession)
++{
++    tr_sessionRefreshDownloadLimit(static_cast<tr_session*>(vsession));
++}
++
++static void setDownloadThrottled(bool throttled)
++{
++    tr_session* session = throttleSession.load();
++
++    if (session != nullptr && downloadThrottled.exchange(throttled) != throttled)
++    {
++        tr_runInEventThread(session, refreshDownloadLimit, session);
++    }
++}
++
++bool tr_ioDownloadThrottled()
++{
++    return downloadThrottled.load();
++}
++
++void tr_ioShutdown()
++{
++    throttleSession = nullptr;
++    downloadThrottled = false;
++}
++
++static void startDirtyMonitor(tr_session* session)
++{
++    throttleSession = session;
++    bool expected = false;
++
++    if (!monitorStarted.compare_exchange_strong(expected, true))
++    {
++        return;
++    }
++
++    std::thread([]() {
++        for (;;)
++        {
++            std::this_thread::sleep_for(std::chrono::milliseconds(250));
++
++            if (throttleSession.load() == nullptr)
++            {
++                continue;
++            }
++
++            uint64_t const dirty = readDirtyBytes();
++
++            if (dirty >= maxDirtyBytes())
++            {
++                setDownloadThrottled(true);
++            }
++            else if (dirty < maxDirtyBytes() / 2)
++            {
++                setDownloadThrottled(false);
++            }
++        }
++    }).detach();
 +}
 +
  /* returns 0 on success, or an errno on failure */
  static int readOrWriteBytes(
      tr_session* session,
-@@ -139,6 +182,16 @@ static int readOrWriteBytes(
+@@ -139,6 +245,10 @@ static int readOrWriteBytes(
                  tr_logAddTorErr(tor, "write failed for \"%s\": %s", file->name, error->message);
                  tr_error_free(error);
              }
-+            else if (syncWritesEnabled())
++            else
 +            {
-+                static uint64_t unsyncedBytes = 0;
-+                unsyncedBytes += buflen;
-+
-+                if (unsyncedBytes >= SYNC_WRITES_THRESHOLD && syncFileAsync(fd))
-+                {
-+                    unsyncedBytes = 0;
-+                }
++                startDirtyMonitor(session);
 +            }
          }
          else if (ioMode == TR_IO_PREFETCH)
          {
+diff --git a/libtransmission/inout.h b/libtransmission/inout.h
+index cb215fdb..370d21b5 100644
+--- a/libtransmission/inout.h
++++ b/libtransmission/inout.h
+@@ -13,6 +13,14 @@
+ #endif
+ 
+ struct tr_torrent;
++struct tr_session;
++
++/* true while unsynced writes exceed the limit; the session caps the download rate meanwhile */
++bool tr_ioDownloadThrottled();
++
++void tr_ioShutdown();
++
++void tr_sessionRefreshDownloadLimit(tr_session* session);
+ 
+ /**
+  * @addtogroup file_io File IO
 diff --git a/libtransmission/peer-mgr.cc b/libtransmission/peer-mgr.cc
 index c3285bfc..93cd50c5 100644
 --- a/libtransmission/peer-mgr.cc
@@ -192,3 +275,52 @@ index c3285bfc..93cd50c5 100644
      /* primary key: weight */
      int missing = tr_torrentMissingBlocksInPiece(tor, a->index);
      int pending = a->requestCount;
+diff --git a/libtransmission/session.cc b/libtransmission/session.cc
+index 944f46fa..c355e44e 100644
+--- a/libtransmission/session.cc
++++ b/libtransmission/session.cc
+@@ -62,6 +62,7 @@
+ #endif
+ 
+ #include "tr-lpd.h"
++#include "inout.h"
+ #include "trevent.h"
+ #include "utils.h"
+ #include "variant.h"
+@@ -1509,7 +1510,14 @@ bool tr_sessionGetActiveSpeedLimit_KBps(tr_session const* session, tr_direction
+ static void updateBandwidth(tr_session* session, tr_direction dir)
+ {
+     unsigned int limit_Bps = 0;
+-    bool const isLimited = tr_sessionGetActiveSpeedLimit_Bps(session, dir, &limit_Bps);
++    bool isLimited = tr_sessionGetActiveSpeedLimit_Bps(session, dir, &limit_Bps);
++
++    if (dir == TR_DOWN && tr_ioDownloadThrottled())
++    {
++        isLimited = true;
++        limit_Bps = 1;
++    }
++
+     bool const zeroCase = isLimited && limit_Bps == 0;
+ 
+     session->bandwidth->setLimited(dir, isLimited && !zeroCase);
+@@ -1517,6 +1525,11 @@ static void updateBandwidth(tr_session* session, tr_direction dir)
+     session->bandwidth->setDesiredSpeedBytesPerSecond(dir, limit_Bps);
+ }
+ 
++void tr_sessionRefreshDownloadLimit(tr_session* session)
++{
++    updateBandwidth(session, TR_DOWN);
++}
++
+ enum
+ {
+     MINUTES_PER_HOUR = 60,
+@@ -2092,6 +2105,8 @@ void tr_sessionClose(tr_session* session)
+ {
+     TR_ASSERT(tr_isSession(session));
+ 
++    tr_ioShutdown();
++
+     time_t const deadline = time(nullptr) + SHUTDOWN_MAX_SECONDS;
+ 
+     dbgmsg(

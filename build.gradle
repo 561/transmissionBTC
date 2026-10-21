@@ -125,6 +125,9 @@ task mergeWebAssets() {
 
         def md = java.security.MessageDigest.getInstance("SHA1")
         arch.eachByte(1024 * 1024) { byte[] buf, int n -> md.update(buf, 0, n) }
+        def extraJs = file('src/main/web-extra/idle-control.js')
+        md.update(extraJs.bytes)
+        md.update("page-tag-v2".bytes)
         def sha1 = new BigInteger(1, md.digest()).toString(16).padLeft( 40, '0' )
         new File(webDir).mkdirs()
         new File(webDir, 'checksum.sha1').write(sha1)
@@ -146,6 +149,11 @@ task mergeWebAssets() {
         }
 
         copy {
+            from extraJs
+            into webDir
+        }
+
+        copy {
             from(tarTree(arch)) {
                 include 'transmission-web-control-master/src/**'
                 includeEmptyDirs = false
@@ -157,6 +165,15 @@ task mergeWebAssets() {
 
             into webDir
             rename 'index.html', 'index.webcontrol.html'
+        }
+
+        ['index.html', 'index.original.html', 'index.webcontrol.html'].each { name ->
+            def page = new File(webDir, name)
+            if (page.isFile()) {
+                def tag = "<script src=\"idle-control.js?v=${sha1.take(8)}\"></script>"
+                def text = page.text.replaceAll(/<script src="idle-control\.js[^"]*"><\/script>/, '')
+                page.text = text.contains('</body>') ? text.replace('</body>', tag + '</body>') : text + tag
+            }
         }
     }
 }
