@@ -1,0 +1,194 @@
+diff --git a/libtransmission/inout.cc b/libtransmission/inout.cc
+index ec3e398e..20f0f18b 100644
+--- a/libtransmission/inout.cc
++++ b/libtransmission/inout.cc
+@@ -7,9 +7,13 @@
+  */
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cerrno>
+ #include <cstdlib> /* bsearch() */
+ #include <cstring> /* memcmp() */
++#include <thread>
++
++#include <unistd.h>
+ 
+ #include "transmission.h"
+ #include "cache.h" /* tr_cacheReadBlock() */
+@@ -37,6 +41,45 @@ enum
+     TR_IO_WRITE
+ };
+ 
++static uint64_t constexpr SYNC_WRITES_THRESHOLD = 2 * 1048576;
++
++static std::atomic<bool> syncInFlight{ false };
++
++static bool syncFileAsync(tr_sys_file_t fd)
++{
++    bool expected = false;
++
++    if (!syncInFlight.compare_exchange_strong(expected, true))
++    {
++        return false;
++    }
++
++    int const copy = dup(fd);
++
++    if (copy < 0)
++    {
++        syncInFlight = false;
++        return false;
++    }
++
++    std::thread([copy]() {
++        fsync(copy);
++        close(copy);
++        syncInFlight = false;
++    }).detach();
++
++    return true;
++}
++
++static bool syncWritesEnabled()
++{
++    static bool const enabled = []() {
++        char const* env = getenv("TRANSMISSION_SYNC_WRITES");
++        return env == nullptr || env[0] != '0';
++    }();
++    return enabled;
++}
++
+ /* returns 0 on success, or an errno on failure */
+ static int readOrWriteBytes(
+     tr_session* session,
+@@ -139,6 +182,16 @@ static int readOrWriteBytes(
+                 tr_logAddTorErr(tor, "write failed for \"%s\": %s", file->name, error->message);
+                 tr_error_free(error);
+             }
++            else if (syncWritesEnabled())
++            {
++                static uint64_t unsyncedBytes = 0;
++                unsyncedBytes += buflen;
++
++                if (unsyncedBytes >= SYNC_WRITES_THRESHOLD && syncFileAsync(fd))
++                {
++                    unsyncedBytes = 0;
++                }
++            }
+         }
+         else if (ioMode == TR_IO_PREFETCH)
+         {
+diff --git a/libtransmission/peer-mgr.cc b/libtransmission/peer-mgr.cc
+index c3285bfc..93cd50c5 100644
+--- a/libtransmission/peer-mgr.cc
++++ b/libtransmission/peer-mgr.cc
+@@ -29,6 +29,7 @@
+ #include "completion.h"
+ #include "crypto-utils.h"
+ #include "handshake.h"
++#include "inout.h"
+ #include "log.h"
+ #include "net.h"
+ #include "peer-io.h"
+@@ -827,6 +828,77 @@ static tr_torrent const* weightTorrent;
+ 
+ static uint16_t const* weightReplication;
+ 
++static std::vector<uint64_t> weightFileFrontier;
++
++static uint64_t weightWindowBytes = 0;
++
++static uint64_t getPieceWindowBytes()
++{
++    static uint64_t const bytes = []() {
++        char const* env = getenv("TRANSMISSION_PIECE_WINDOW_MB");
++        long const mb = (env != nullptr) ? atol(env) : 16;
++        return mb > 0 ? static_cast<uint64_t>(mb) * 1048576 : uint64_t{ 0 };
++    }();
++    return bytes;
++}
++
++static void updatePieceWindow(tr_torrent const* tor)
++{
++    tr_info const* const inf = &tor->info;
++    weightWindowBytes = getPieceWindowBytes();
++    weightFileFrontier.clear();
++
++    if (weightWindowBytes == 0)
++    {
++        return;
++    }
++
++    weightFileFrontier.assign(inf->fileCount, 0);
++
++    for (tr_piece_index_t i = 0; i < inf->pieceCount; ++i)
++    {
++        if (!tr_torrentPieceIsComplete(tor, i))
++        {
++            continue;
++        }
++
++        tr_file_index_t fileIndex = 0;
++        uint64_t fileOffset = 0;
++        tr_ioFindFileLocation(tor, i, 0, &fileIndex, &fileOffset);
++        uint64_t const end = std::min<uint64_t>(fileOffset + inf->pieceSize, inf->files[fileIndex].length);
++        weightFileFrontier[fileIndex] = std::max(weightFileFrontier[fileIndex], end);
++    }
++}
++
++static int pieceWindowRank(tr_torrent const* tor, tr_piece_index_t piece)
++{
++    if (weightWindowBytes == 0 || weightFileFrontier.empty())
++    {
++        return 0;
++    }
++
++    tr_file_index_t fileIndex = 0;
++    uint64_t fileOffset = 0;
++    tr_ioFindFileLocation(tor, piece, 0, &fileIndex, &fileOffset);
++    uint64_t const frontier = weightFileFrontier[fileIndex];
++
++    if (fileOffset <= frontier + weightWindowBytes)
++    {
++        return 0;
++    }
++
++    uint64_t over = (fileOffset - frontier) / weightWindowBytes;
++    int rank = 1;
++
++    while (over > 1)
++    {
++        over >>= 1;
++        ++rank;
++    }
++
++    return rank;
++}
++
+ static void setComparePieceByWeightTorrent(tr_swarm* s)
+ {
+     if (!replicationExists(s))
+@@ -836,6 +908,7 @@ static void setComparePieceByWeightTorrent(tr_swarm* s)
+ 
+     weightTorrent = s->tor;
+     weightReplication = s->pieceReplication;
++    updatePieceWindow(s->tor);
+ }
+ 
+ /* we try to create a "weight" s.t. high-priority pieces come before others,
+@@ -847,6 +920,14 @@ static int comparePieceByWeight(void const* va, void const* vb)
+     tr_torrent const* const tor = weightTorrent;
+     uint16_t const* const rep = weightReplication;
+ 
++    int const windowA = pieceWindowRank(tor, a->index);
++    int const windowB = pieceWindowRank(tor, b->index);
++
++    if (windowA != windowB)
++    {
++        return windowA < windowB ? -1 : 1;
++    }
++
+     /* primary key: weight */
+     int missing = tr_torrentMissingBlocksInPiece(tor, a->index);
+     int pending = a->requestCount;

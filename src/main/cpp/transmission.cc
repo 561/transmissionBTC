@@ -138,6 +138,8 @@ Java_com_ap_transmission_btc_Native_transmissionStart(
   env->ReleaseStringUTFChars(jdownloadsDir, downloadsDir);
 
   tr_variantDictAddInt(&settings, TR_KEY_encryption, encrMode);
+  tr_variantDictRemove(&settings, TR_KEY_preallocation);
+  tr_variantDictAddInt(&settings, TR_KEY_preallocation, TR_PREALLOCATE_NONE);
   tr_variantDictAddBool(&settings, TR_KEY_sequentialDownload, enableSequential);
 
   if (enableRpc) {

@@ -27,7 +27,7 @@ android {
     defaultConfig {
         applicationId 'com.ap.transmission.btc'
         minSdkVersion 19
-        targetSdkVersion 30
+        targetSdkVersion 29
         compileSdkVersion 30
         versionCode versionNum
         versionName version

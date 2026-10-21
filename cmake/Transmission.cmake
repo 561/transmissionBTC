@@ -30,6 +30,9 @@ ExternalProject_Add(transmission
         GIT_SHALLOW 1
         GIT_PROGRESS 1
         GIT_SUBMODULES_RECURSE 1
+        UPDATE_COMMAND ""
+        PATCH_COMMAND sh -c "git apply --check '${CMAKE_CURRENT_SOURCE_DIR}/patches/transmission-engine.patch' 2>/dev/null && git apply '${CMAKE_CURRENT_SOURCE_DIR}/patches/transmission-engine.patch' || true"
+        BUILD_ALWAYS 1
         CONFIGURE_COMMAND ${CMAKE_COMMAND} ${TR_SRC_DIR} ${TR_CMAKE_ARGS}
         BUILD_COMMAND ${MAKE_EXE} -j${NCPU}
         INSTALL_COMMAND ""
