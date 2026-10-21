@@ -37,6 +37,7 @@ import static com.ap.transmission.btc.Prefs.K.START_ON_BOOT;
 import static com.ap.transmission.btc.Prefs.K.UUID;
 import static com.ap.transmission.btc.Prefs.K.WATCH_DIR;
 import static com.ap.transmission.btc.Prefs.K.WATCH_INTERVAL;
+import static com.ap.transmission.btc.Prefs.K.IDLE_ONLY;
 import static com.ap.transmission.btc.Prefs.K.WIFI_ETH_ONLY;
 import static com.ap.transmission.btc.Prefs.K.WIFI_SSID;
 
@@ -72,6 +73,7 @@ public class Prefs {
     ENABLE_UPNP(false),
     HTTP_SERVER_PORT(9092),
     WIFI_ETH_ONLY(true),
+    IDLE_ONLY(false),
     WIFI_SSID(""),
     UUID(new Function<Prefs, Object>() {
       public Object apply(Prefs p) {
@@ -185,6 +187,8 @@ public class Prefs {
         return getHttpServerPort();
       case WIFI_ETH_ONLY:
         return isWifiEthOnly();
+      case IDLE_ONLY:
+        return isIdleOnly();
       case WIFI_SSID:
         return getWifiSsid();
       default:
@@ -263,6 +267,9 @@ public class Prefs {
         break;
       case WIFI_ETH_ONLY:
         setWifiEthOnly((Boolean) value);
+        break;
+      case IDLE_ONLY:
+        setIdleOnly((Boolean) value);
         break;
       case WIFI_SSID:
         setWifiSsid(value.toString());
@@ -520,6 +527,14 @@ public class Prefs {
 
   public void setWifiEthOnly(boolean wifiEthOnly) {
     putBoolean(WIFI_ETH_ONLY, wifiEthOnly);
+  }
+
+  public boolean isIdleOnly() {
+    return getBoolean(IDLE_ONLY);
+  }
+
+  public void setIdleOnly(boolean idleOnly) {
+    putBoolean(IDLE_ONLY, idleOnly);
   }
 
   public String getWifiSsid() {

@@ -18,6 +18,7 @@
     <string name="start_on_boot">Запускать после загрузки системы</string>
     <string name="boot_delay">Задержка (секунд)</string>
     <string name="wifi_eth_only">Работать только в сети WiFi/Ethernet</string>
+    <string name="idle_only">Качать только в простое (заставка или экран выключен)</string>
     <string name="wifi_eth_only_ssid">Разрешенные SSIDs</string>
     <string name="increase_so_buf">Увеличить сокет буферы (нужен рут)</string>
     <string name="enable_seq_download">Включить последовательную загрузку</string>

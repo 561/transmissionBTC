@@ -19,6 +19,7 @@
     <string name="start_on_boot">Start on boot</string>
     <string name="boot_delay">Boot delay in seconds</string>
     <string name="wifi_eth_only">WiFi/Ethernet network only</string>
+    <string name="idle_only">Download only when idle (screensaver or screen off)</string>
     <string name="wifi_eth_only_ssid">Allowed SSIDs</string>
     <string name="increase_so_buf">Increase socket buffers (requires root)</string>
     <string name="enable_seq_download">Enable sequential download</string>

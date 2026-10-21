@@ -1,3 +1,4 @@
+#include <vector>
 #include "commons.h"
 #include "native_to_java.h"
 #include "transmission-private.h"
@@ -205,8 +206,31 @@ Java_com_ap_transmission_btc_Native_transmissionStop(
 // -------------------------------------------------------------------------------------------------
 
 // --------------------------------------- Suspend -------------------------------------------------
+static std::vector<int> suspendedChecks;
+
 static void *transmissionSuspend(tr_session *session, void *data, Err *__unused err) {
-  tr_sessionSuspend(session, (bool) data);
+  bool suspend = (bool) data;
+  tr_sessionSuspend(session, suspend);
+
+  if (suspend) {
+    for (auto tor : session->torrents) {
+      if (tor->isRunning || tor->isSuspended) continue;
+      tr_torrent_activity activity = tr_torrentGetActivity(tor);
+
+      if (activity == TR_STATUS_CHECK || activity == TR_STATUS_CHECK_WAIT) {
+        suspendedChecks.push_back(tor->uniqueId);
+        tr_torrentStop(tor);
+      }
+    }
+  } else {
+    for (int id : suspendedChecks) {
+      tr_torrent *tor = tr_torrentFindFromId(session, id);
+      if (tor != nullptr) tr_torrentVerify(tor, nullptr, nullptr);
+    }
+
+    suspendedChecks.clear();
+  }
+
   return NULL;
 }
 

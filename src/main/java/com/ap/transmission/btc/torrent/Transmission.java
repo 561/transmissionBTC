@@ -30,6 +30,7 @@ import com.ap.transmission.btc.func.Promise;
 import com.ap.transmission.btc.http.HttpServer;
 import com.ap.transmission.btc.http.SimpleHttpServer;
 import com.ap.transmission.btc.receivers.ConnectivityChangeReceiver;
+import com.ap.transmission.btc.receivers.IdleStateReceiver;
 import com.ap.transmission.btc.services.TransmissionService;
 import com.ap.transmission.btc.ssdp.SsdpServer;
 
@@ -164,6 +165,11 @@ public class Transmission {
 				ConnectivityChangeReceiver.register(ctx);
 			}
 
+			if (prefs.isIdleOnly()) {
+				IdleStateReceiver.register(ctx);
+				suspend |= !IdleStateReceiver.isIdle();
+			}
+
 			Native.envSet("TMP", tmp.getAbsolutePath());
 			Native.envSet("TRANSMISSION_WEB_HOME", webDir.getAbsolutePath());
 			increaseSoBuf();
@@ -257,6 +263,7 @@ public class Transmission {
 				if (semaphores != null) for (Long sem : semaphores) Native.semPost(sem);
 				if (watchers != null) for (Watcher w : watchers) w.stopWatching();
 				ConnectivityChangeReceiver.unregister(getContext());
+				IdleStateReceiver.unregister(getContext());
 				Native.transmissionSetRpcCallbacks(null, null, null, null);
 				Utils.close(httpServer, ssdpServer);
 				stopExecutor();
@@ -338,6 +345,15 @@ public class Transmission {
 		}.
 
 				execute();
+	}
+
+	public void updateAutoSuspend() {
+		if (!isRunning() || isSuspendedByUser()) return;
+		boolean networkBlocked = prefs.isWifiEthOnly()
+				&& !Utils.isWifiEthActive(getContext(), prefs.getWifiSsid());
+		boolean busy = prefs.isIdleOnly() && !IdleStateReceiver.isIdle();
+		boolean suspend = networkBlocked || busy;
+		if (suspend != isSuspended()) suspend(suspend, false, null);
 	}
 
 	public boolean isSuspended() {

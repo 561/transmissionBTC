@@ -6,7 +6,6 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.ConnectivityManager;
 
-import com.ap.transmission.btc.Prefs;
 import com.ap.transmission.btc.Utils;
 import com.ap.transmission.btc.services.TransmissionService;
 import com.ap.transmission.btc.torrent.Transmission;
@@ -35,10 +34,6 @@ public class ConnectivityChangeReceiver extends BroadcastReceiver {
     Utils.resetInterfaceAddress();
     Transmission tr = TransmissionService.getTransmission();
     if ((tr == null) || !tr.isRunning()) return;
-    Prefs prefs = new Prefs(context);
-
-    if (prefs.isWifiEthOnly() && !tr.isSuspendedByUser()) {
-      tr.suspend(!Utils.isWifiEthActive(prefs.getContext(), prefs.getWifiSsid()), false, null);
-    }
+    tr.updateAutoSuspend();
   }
 }

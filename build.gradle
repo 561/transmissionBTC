@@ -76,6 +76,7 @@ android {
 
     buildTypes {
         release {
+            applicationIdSuffix '.fork'
             debuggable false
             minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
@@ -131,6 +132,11 @@ task mergeWebAssets() {
         copy {
             from "${webInstallDir}/usr/local/share/transmission/public_html"
             into webDir
+        }
+
+        def originalIndex = new File(webDir, 'index.html')
+        if (!originalIndex.isFile()) {
+            originalIndex.write('<!DOCTYPE html><html><body></body></html>')
         }
 
         copy {

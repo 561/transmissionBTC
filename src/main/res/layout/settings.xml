@@ -76,6 +76,13 @@
                 android:visibility="@{p.wifiEthOnly}"
                 app:pref="@{K.WIFI_SSID}" />
 
+            <com.ap.transmission.btc.views.CheckBoxView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_columnSpan="2"
+                app:pref="@{K.IDLE_ONLY}"
+                app:text="@string/idle_only" />
+
             <!-- Encryption mode -->
             <TextView
                 android:layout_height="wrap_content"
