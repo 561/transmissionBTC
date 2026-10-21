@@ -1,5 +1,29 @@
+diff --git a/libtransmission/bandwidth.cc b/libtransmission/bandwidth.cc
+index e02e3ba5..2351a4da 100644
+--- a/libtransmission/bandwidth.cc
++++ b/libtransmission/bandwidth.cc
+@@ -11,6 +11,7 @@
+ 
+ #include "transmission.h"
+ #include "bandwidth.h"
++#include "inout.h"
+ #include "crypto-utils.h" /* tr_rand_int_weak() */
+ #include "log.h"
+ #include "peer-io.h"
+@@ -242,6 +243,11 @@ unsigned int Bandwidth::clamp(uint64_t now, tr_direction dir, unsigned int byte_
+ {
+     TR_ASSERT(tr_isDirection(dir));
+ 
++    if (dir == TR_DOWN && tr_ioDownloadThrottled())
++    {
++        return 0;
++    }
++
+     if (this->band_[dir].is_limited_)
+     {
+         byte_count = std::min(byte_count, this->band_[dir].bytes_left_);
 diff --git a/libtransmission/inout.cc b/libtransmission/inout.cc
-index ec3e398e..cb15db5f 100644
+index ec3e398e..e60932db 100644
 --- a/libtransmission/inout.cc
 +++ b/libtransmission/inout.cc
 @@ -7,9 +7,14 @@
@@ -108,7 +132,7 @@ index ec3e398e..cb15db5f 100644
 +    std::thread([]() {
 +        for (;;)
 +        {
-+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
++            std::this_thread::sleep_for(std::chrono::milliseconds(100));
 +
 +            if (throttleSession.load() == nullptr)
 +            {
