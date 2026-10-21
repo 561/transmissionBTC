@@ -1,16 +1,15 @@
 (function () {
   var base = location.protocol + '//' + location.hostname + ':9093/idle/';
-  var box = document.createElement('div');
-  box.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:99999;background:#222;color:#fff;' +
-    'font:13px sans-serif;padding:8px 10px;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.4);' +
-    'display:flex;gap:6px;align-items:center;flex-wrap:wrap;max-width:420px';
+  var box = document.createElement('span');
+  box.style.cssText = 'color:#fff;font:13px sans-serif;padding:3px 8px;border-radius:4px;margin-right:12px;' +
+    'display:inline-flex;gap:6px;align-items:center;vertical-align:middle;white-space:nowrap';
   var label = document.createElement('span');
   box.appendChild(label);
 
   function button(text, path) {
     var b = document.createElement('button');
     b.textContent = text;
-    b.style.cssText = 'cursor:pointer;border:0;border-radius:4px;padding:4px 8px;background:#555;color:#fff';
+    b.style.cssText = 'cursor:pointer;border:0;border-radius:3px;padding:2px 7px;background:rgba(255,255,255,.25);color:#fff;font:12px sans-serif';
     b.onclick = function () { call('POST', path); };
     box.appendChild(b);
     return b;
@@ -51,7 +50,19 @@
   }
 
   function poll() { call('GET', 'status'); }
-  document.body.appendChild(box);
+  function placeBox() {
+    var theme = document.getElementById('select-themes');
+    var themeLabel = theme && theme.previousElementSibling;
+
+    if (themeLabel && themeLabel.parentNode) {
+      themeLabel.parentNode.insertBefore(box, themeLabel);
+    } else {
+      box.style.cssText += ';position:fixed;right:12px;bottom:12px;z-index:99999;padding:8px 10px';
+      document.body.appendChild(box);
+    }
+  }
+
+  placeBox();
   poll();
   setInterval(poll, 3000);
 
@@ -76,4 +87,65 @@
   }
 
   setInterval(watchReloadLoop, 5000);
+
+  var deleteUrl = location.protocol + '//' + location.hostname + ':9093/file/delete?path=';
+
+  function deleteSelectedFiles() {
+    var rows = $('#torrent-files-table').datagrid('getChecked');
+    var id = system.currentTorrentId;
+
+    if (!rows.length || !id) {
+      alert('Отметь галочками файлы, которые нужно удалить');
+      return;
+    }
+
+    var indexes = rows.map(function (row) { return parseInt(row.index, 10); });
+
+    if (!confirm('Удалить файлов: ' + indexes.length + ' — с флешки, и больше их не качать?')) return;
+
+    transmission.exec({ method: 'torrent-set', arguments: { ids: [id], 'files-unwanted': indexes } }, function () {
+      transmission.exec({ method: 'torrent-get', arguments: { ids: [id], fields: ['files', 'downloadDir'] } }, function (res) {
+        var torrent = res.arguments.torrents[0];
+        var dir = torrent.downloadDir.replace(/\/$/, '');
+        var requests = indexes.map(function (i) {
+          return fetch(deleteUrl + encodeURIComponent(dir + '/' + torrent.files[i].name), { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .catch(function () { return { deleted: false }; });
+        });
+
+        Promise.all(requests).then(function (results) {
+          var removed = results.filter(function (r) { return r.deleted; }).length;
+          alert('Больше не качается: ' + indexes.length + ', удалено с флешки: ' + removed);
+          system.reloadData();
+        });
+      });
+    });
+  }
+
+  function addDeleteButton() {
+    if (typeof $ === 'undefined' || !$('#torrent-files-table').length) return false;
+    var table = $('#torrent-files-table');
+    var buttons = table.data('buttons');
+    if (!buttons) return false;
+
+    if (!buttons.some(function (b) { return b.id === 'pager-button-delete'; })) {
+      var at = buttons.findIndex(function (b) { return b.id === 'torrent-files-filter'; });
+      var button = {
+        id: 'pager-button-delete',
+        iconCls: 'icon-remove-torrent',
+        title: 'Удалить отмеченные файлы с флешки и не качать',
+        handler: deleteSelectedFiles
+      };
+      buttons.splice(at < 0 ? buttons.length : at, 0, button, '-');
+      table.datagrid('getPager').pagination({ buttons: buttons });
+    }
+
+    return true;
+  }
+
+  var buttonTimer = setInterval(function () {
+    try {
+      if (addDeleteButton()) clearInterval(buttonTimer);
+    } catch (ignore) {}
+  }, 1000);
 })();
