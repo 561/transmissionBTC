@@ -4,6 +4,8 @@ A fork of [AndreyPavlenko/transmissionbtc](https://github.com/AndreyPavlenko/tra
 
 Built and tested on a Google TV Streamer (Android 14, 32-bit ARM) downloading to an exFAT Kingston flash drive. On that setup the stock app froze the TV, stalled the web interface for 20-30 seconds at a time and wrote at about 1 MB/s. This fork addresses the causes instead of capping speed.
 
+![Web UI with the idle status badge](docs/web-ui.png)
+
 ## What this fork adds
 
 ### Downloads only when the TV is idle
