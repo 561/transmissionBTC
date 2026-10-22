@@ -18,6 +18,8 @@ import android.content.res.AssetManager;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.FileObserver;
+import android.os.Handler;
+import android.os.Looper;
 import android.support.annotation.Nullable;
 
 import com.ap.transmission.btc.EncrMode;
@@ -66,6 +68,7 @@ public class Transmission {
 	public static final int OVERRIDE_AUTO = 0;
 	public static final int OVERRIDE_RUN = 1;
 	public static final int OVERRIDE_PAUSE = 2;
+	private static final int AUTO_SUSPEND_RECHECK_SEC = 15;
 	private static final String TAG = Transmission.class.getName();
 	private static final String SETTINGS_FILE = "settings.json";
 	private final ReadWriteLock lock = new ReentrantReadWriteLock();
@@ -240,6 +243,9 @@ public class Transmission {
 		PeerWatchdog watchdog = new PeerWatchdog(this, prefs);
 		getScheduler().scheduleWithFixedDelay(watchdog::check, PeerWatchdog.CHECK_PERIOD_SEC,
 				PeerWatchdog.CHECK_PERIOD_SEC, TimeUnit.SECONDS);
+		Handler main = new Handler(Looper.getMainLooper());
+		getScheduler().scheduleWithFixedDelay(() -> main.post(this::updateAutoSuspend), AUTO_SUSPEND_RECHECK_SEC,
+				AUTO_SUSPEND_RECHECK_SEC, TimeUnit.SECONDS);
 	}
 
 	private void startWatcher(String watchDir, String downloadDir) {
