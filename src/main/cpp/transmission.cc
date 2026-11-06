@@ -5,6 +5,7 @@
 #include <libtransmission/version.h>
 #include <libtransmission/variant.h>
 #include <libtransmission/file.h>
+#include <libtransmission/inout.h>
 
 #define MEM_K 1024
 #define MEM_K_STR "KiB"
@@ -110,6 +111,7 @@ static void *transmissionStart(tr_session *session, void *data, Err *__unused er
   tr_torrent **torrents;
   tr_ctor *ctor = tr_ctorNew(session);
   torrents = tr_sessionLoadTorrents(session, ctor, NULL);
+  tr_ioSetSuspended(suspend);
   tr_sessionSuspend(session, suspend);
   tr_free(torrents);
   tr_ctorFree(ctor);
@@ -222,11 +224,9 @@ static std::vector<int> suspendedChecks;
 
 static void *transmissionSuspend(tr_session *session, void *data, Err *__unused err) {
   bool suspend = (bool) data;
-  tr_sessionSuspend(session, suspend);
 
   if (suspend) {
     for (auto tor : session->torrents) {
-      if (tor->isRunning || tor->isSuspended) continue;
       tr_torrent_activity activity = tr_torrentGetActivity(tor);
 
       if (activity == TR_STATUS_CHECK || activity == TR_STATUS_CHECK_WAIT) {
@@ -235,6 +235,7 @@ static void *transmissionSuspend(tr_session *session, void *data, Err *__unused 
       }
     }
   } else {
+    tr_sessionSuspend(session, false);
     for (int id : suspendedChecks) {
       tr_torrent *tor = tr_torrentFindFromId(session, id);
       if (tor != nullptr) tr_torrentVerify(tor, nullptr, nullptr);
@@ -249,6 +250,7 @@ static void *transmissionSuspend(tr_session *session, void *data, Err *__unused 
 JNIEXPORT void JNICALL
 Java_com_ap_transmission_btc_Native_transmissionSuspend(
     JNIEnv *__unused env, jclass __unused c, jlong jsession, jboolean suspend) {
+  tr_ioSetSuspended(suspend);
   runInTransmissionThreadEx(env, jsession, transmissionSuspend, (void *) (intptr_t) suspend);
   CATCH:;
 }

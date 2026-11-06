@@ -1,5 +1,5 @@
 diff --git a/libtransmission/bandwidth.cc b/libtransmission/bandwidth.cc
-index e02e3ba5..2351a4da 100644
+index e02e3ba5..4e2226f0 100644
 --- a/libtransmission/bandwidth.cc
 +++ b/libtransmission/bandwidth.cc
 @@ -11,6 +11,7 @@
@@ -14,7 +14,7 @@ index e02e3ba5..2351a4da 100644
  {
      TR_ASSERT(tr_isDirection(dir));
  
-+    if (dir == TR_DOWN && tr_ioDownloadThrottled())
++    if (tr_ioSuspended() || (dir == TR_DOWN && tr_ioDownloadThrottled()))
 +    {
 +        return 0;
 +    }
@@ -23,7 +23,7 @@ index e02e3ba5..2351a4da 100644
      {
          byte_count = std::min(byte_count, this->band_[dir].bytes_left_);
 diff --git a/libtransmission/inout.cc b/libtransmission/inout.cc
-index ec3e398e..e60932db 100644
+index ec3e398e..3311d0af 100644
 --- a/libtransmission/inout.cc
 +++ b/libtransmission/inout.cc
 @@ -7,9 +7,14 @@
@@ -49,11 +49,12 @@ index ec3e398e..e60932db 100644
  #include "log.h"
  #include "peer-common.h" /* MAX_BLOCK_SIZE */
  #include "stats.h" /* tr_statsFileCreated() */
-@@ -37,6 +43,106 @@ enum
+@@ -37,6 +43,117 @@ enum
      TR_IO_WRITE
  };
  
 +static std::atomic<bool> downloadThrottled{ false };
++static std::atomic<bool> ioSuspended{ false };
 +static std::atomic<tr_session*> throttleSession{ nullptr };
 +static std::atomic<bool> monitorStarted{ false };
 +
@@ -110,7 +111,17 @@ index ec3e398e..e60932db 100644
 +
 +bool tr_ioDownloadThrottled()
 +{
-+    return downloadThrottled.load();
++    return downloadThrottled.load() || ioSuspended.load();
++}
++
++bool tr_ioSuspended()
++{
++    return ioSuspended.load();
++}
++
++void tr_ioSetSuspended(bool suspended)
++{
++    ioSuspended = suspended;
 +}
 +
 +void tr_ioShutdown()
@@ -156,7 +167,7 @@ index ec3e398e..e60932db 100644
  /* returns 0 on success, or an errno on failure */
  static int readOrWriteBytes(
      tr_session* session,
-@@ -139,6 +245,10 @@ static int readOrWriteBytes(
+@@ -139,6 +256,10 @@ static int readOrWriteBytes(
                  tr_logAddTorErr(tor, "write failed for \"%s\": %s", file->name, error->message);
                  tr_error_free(error);
              }
@@ -168,10 +179,10 @@ index ec3e398e..e60932db 100644
          else if (ioMode == TR_IO_PREFETCH)
          {
 diff --git a/libtransmission/inout.h b/libtransmission/inout.h
-index cb215fdb..370d21b5 100644
+index cb215fdb..638e2bb1 100644
 --- a/libtransmission/inout.h
 +++ b/libtransmission/inout.h
-@@ -13,6 +13,14 @@
+@@ -13,6 +13,18 @@
  #endif
  
  struct tr_torrent;
@@ -181,6 +192,10 @@ index cb215fdb..370d21b5 100644
 +bool tr_ioDownloadThrottled();
 +
 +void tr_ioShutdown();
++
++bool tr_ioSuspended();
++
++void tr_ioSetSuspended(bool suspended);
 +
 +void tr_sessionRefreshDownloadLimit(tr_session* session);
  

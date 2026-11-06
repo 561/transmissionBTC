@@ -11,6 +11,8 @@ Built and tested on a Google TV Streamer (Android 14, 32-bit ARM) downloading to
 ### Downloads only when the TV is idle
 * New setting **"Download only when idle (screensaver or screen off)"**.
 * Downloading starts when the screensaver or screen-off begins and pauses within seconds when someone uses the TV, so playback and navigation never compete with the flash drive.
+* The pause is a gate in `Bandwidth::clamp` set straight from the UI thread: no torrent is stopped and the cache is not flushed, so it takes effect even while the engine thread is blocked on a slow write.
+* App log: daily files in `Android/data/<package>/files/logs/` on internal storage, kept 2 days, with a status line every minute (idle state, `Dirty`, `Writeback`).
 * Manual override from the web UI: **Download now / Pause / Auto**.
 
 ### Web UI: status badge and file deletion
@@ -21,7 +23,7 @@ Built and tested on a Google TV Streamer (Android 14, 32-bit ARM) downloading to
 
 ### Lag fixes for slow USB flash drives (exFAT / FUSE)
 * **No preallocation.** Android's exFAT FUSE layer zero-fills when a file is extended, which blocks the drive for minutes on multi-GB files.
-* **Dirty-page throttle.** A 100 ms monitor reads `Dirty + Writeback` from `/proc/meminfo`. At 32 MB (configurable with `TRANSMISSION_MAX_DIRTY_MB`) downloading is throttled immediately inside `Bandwidth::clamp`, and released below half of that. This keeps the kernel write queue short, so the engine and web UI never wait on the drive.
+* **Dirty-page throttle.** A 100 ms monitor reads `Dirty + Writeback` from `/proc/meminfo`. At 16 MB (configurable with `TRANSMISSION_MAX_DIRTY_MB`) downloading is throttled immediately inside `Bandwidth::clamp`, and released below half of that. This keeps the kernel write queue short, so the engine and web UI never wait on the drive.
 * **Piece window.** Pieces more than 16 MiB (`TRANSMISSION_PIECE_WINDOW_MB`) ahead of the written data are requested last, so a write never lands far beyond the end of the file and exFAT has no big gap to zero-fill.
 * The engine changes live in [`patches/transmission-engine.patch`](patches/transmission-engine.patch), applied on top of Transmission 3.00.
 

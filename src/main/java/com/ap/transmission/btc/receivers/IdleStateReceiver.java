@@ -64,6 +64,7 @@ public class IdleStateReceiver extends BroadcastReceiver {
         return;
     }
 
+    android.util.Log.w("IdleState", action + " idle=" + wasIdle + "->" + isIdle());
     Transmission tr = TransmissionService.getTransmission();
     if ((tr != null) && tr.isRunning()) tr.onIdleStateChanged(wasIdle != isIdle());
   }

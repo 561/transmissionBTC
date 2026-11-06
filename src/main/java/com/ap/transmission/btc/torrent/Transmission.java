@@ -59,6 +59,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * @author Andrey Pavlenko
  */
 public class Transmission {
+	private static final long STATUS_LOG_SEC = 60;
 	private static final byte STATE_STOPPED = 0;
 	private static final byte STATE_STARTING = 1;
 	private static final byte STATE_RUNNING = 2;
@@ -151,6 +152,7 @@ public class Transmission {
 		state = STATE_STARTING;
 		boolean ok = false;
 		getExecutor(); // Start executor
+		com.ap.transmission.btc.AppLog.start(getContext());
 
 		try {
 			Context ctx = getContext();
@@ -187,6 +189,7 @@ public class Transmission {
 			}
 
 			Native.envSet("TMP", tmp.getAbsolutePath());
+			Native.envSet("TRANSMISSION_MAX_DIRTY_MB", "16");
 			Native.envSet("TRANSMISSION_WEB_HOME", webDir.getAbsolutePath());
 			increaseSoBuf();
 			configureProxy(prefs);
@@ -240,6 +243,8 @@ public class Transmission {
 	}
 
 	private void startPeerWatchdog() {
+		getScheduler().scheduleWithFixedDelay(this::logStatus, STATUS_LOG_SEC, STATUS_LOG_SEC,
+				TimeUnit.SECONDS);
 		PeerWatchdog watchdog = new PeerWatchdog(this, prefs);
 		getScheduler().scheduleWithFixedDelay(watchdog::check, PeerWatchdog.CHECK_PERIOD_SEC,
 				PeerWatchdog.CHECK_PERIOD_SEC, TimeUnit.SECONDS);
@@ -346,7 +351,7 @@ public class Transmission {
 				writeLock().lock();
 				try {
 					if (!isRunning()) return null;
-					debug(TAG, "Suspending: %s, by user: %s", suspend, byUser);
+					info(TAG, "Suspending: %s, by user: %s", suspend, byUser);
 
 					if (suspend) {
 						Utils.close(ssdpServer);
@@ -383,6 +388,21 @@ public class Transmission {
 				&& idleOverride != OVERRIDE_RUN;
 		boolean suspend = idleOverride == OVERRIDE_PAUSE || networkBlocked || busy;
 		if (suspend != isSuspended()) suspend(suspend, false, null);
+	}
+
+	private void logStatus() {
+		if (!isRunning()) return;
+		StringBuilder mem = new StringBuilder();
+		try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader("/proc/meminfo"))) {
+			for (String line; (line = r.readLine()) != null; ) {
+				if (line.startsWith("Dirty:") || line.startsWith("Writeback:")) {
+					mem.append(' ').append(line.replaceAll("\\s+", "").replace("kB", "k"));
+				}
+			}
+		} catch (IOException ex) {
+			mem.append(" meminfo=").append(ex.getMessage());
+		}
+		info(TAG, "Status: %s%s", getIdleStatusJson(), mem);
 	}
 
 	public void onIdleStateChanged(boolean idleChanged) {

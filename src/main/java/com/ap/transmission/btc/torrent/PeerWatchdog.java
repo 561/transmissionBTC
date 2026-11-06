@@ -83,9 +83,13 @@ class PeerWatchdog {
       HttpURLConnection c = (HttpURLConnection) url.openConnection();
       try {
         c.setConnectTimeout(5000);
-        c.setReadTimeout(15000);
+        c.setReadTimeout(60000);
         c.setRequestMethod("POST");
         c.setDoOutput(true);
+        c.setUseCaches(false);
+        c.setRequestProperty("Connection", "close");
+        c.setRequestProperty("Content-Type", "application/json");
+        c.setFixedLengthStreamingMode(body.length);
         c.setRequestProperty("X-Transmission-Session-Id", sessionId);
         if (prefs.isRpcAuthEnabled()) {
           String cred = prefs.getRpcUsername() + ":" + prefs.getRpcPassword();
@@ -96,10 +100,14 @@ class PeerWatchdog {
           os.write(body);
         }
 
-        if (c.getResponseCode() == 409) {
+        int code = c.getResponseCode();
+        if (code == 409) {
           sessionId = c.getHeaderField("X-Transmission-Session-Id");
+          InputStream es = c.getErrorStream();
+          if (es != null) es.close();
           continue;
         }
+        if (code != 200) throw new java.io.IOException("RPC HTTP " + code);
 
         try (InputStream is = c.getInputStream()) {
           java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
