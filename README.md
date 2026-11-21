@@ -18,7 +18,7 @@ Built and tested on a Google TV Streamer (Android 14, 32-bit ARM) downloading to
 ### Web UI: status badge and file deletion
 * A badge in the header (before the theme switcher) shows whether the TV is downloading or paused, and why (idle, busy, user, forced).
 * Buttons to force downloading, pause, or return to automatic mode, no waiting for the idle timer.
-* A **delete** button in the files pager: removes the selected files from the drive and marks them as not wanted.
+* A **delete** button in the files pager: removes the selected files from the drive and marks them as not wanted. Works for any torrent download directory, not only the default one.
 * Reload watchdog: the web UI auto-refresh no longer dies silently after one failed request.
 
 ### Lag fixes for slow USB flash drives (exFAT / FUSE)
@@ -29,6 +29,7 @@ Built and tested on a Google TV Streamer (Android 14, 32-bit ARM) downloading to
 
 ### Reliability
 * **Peer watchdog:** if a downloading torrent has no peers for a minute, it is re-announced to its trackers (and again at most once a minute). Transmission by default only re-announces every 30-60 minutes.
+* **Stuck engine restart:** the engine is restarted in place (like STOP/START, without stopping the app) when no downloading torrent has had a peer for 15 minutes while trackers report peers, or when the peer socket counter is near `peer-limit-global` with far fewer real peers and handshakes (Transmission then silently refuses every new connection). At most once an hour. The minute status line in the app log shows `sockets=<used>/<limit> peers=<n> handshakes=<n>`.
 * **Settings are saved on every change.** Upstream writes `settings.json` only on a clean stop, so anything changed through the web UI (port, cache) was lost when Android killed the app or it was reinstalled.
 * Fixed a stray `switch` fall-through in the native RPC callback.
 
@@ -41,7 +42,7 @@ A tiny HTTP server for scripts and the web UI. It has no authentication, so keep
 | `POST /idle/run` | download now, until the TV next changes idle state |
 | `POST /idle/pause` | pause regardless of idle state |
 | `POST /idle/auto` | back to idle-based control (also forces a state recalculation) |
-| `POST /file/delete?path=...` | delete a file (and its `.part`) inside the download directory only |
+| `POST /file/delete?id=<torrent id>&file=<file index>` | delete that torrent file (and its `.part`) from the torrent's download directory |
 
 ### Measured on the target setup
 * Sustained download to the exFAT flash drive: 1.2-3.5 MB/s with a 64 MB cache.

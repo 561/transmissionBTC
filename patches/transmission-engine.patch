@@ -22,6 +22,35 @@ index e02e3ba5..4e2226f0 100644
      if (this->band_[dir].is_limited_)
      {
          byte_count = std::min(byte_count, this->band_[dir].bytes_left_);
+diff --git a/libtransmission/fdlimit.cc b/libtransmission/fdlimit.cc
+index 56fc9109..cf99c384 100644
+--- a/libtransmission/fdlimit.cc
++++ b/libtransmission/fdlimit.cc
+@@ -573,6 +573,11 @@ tr_socket_t tr_fdSocketCreate(tr_session* session, int domain, int type)
+     return s;
+ }
+ 
++int tr_fdGetPeerSocketCount(tr_session const* session)
++{
++    return session->fdInfo != nullptr ? session->fdInfo->peerCount : 0;
++}
++
+ tr_socket_t tr_fdSocketAccept(tr_session* s, tr_socket_t sockfd, tr_address* addr, tr_port* port)
+ {
+     TR_ASSERT(tr_isSession(s));
+diff --git a/libtransmission/fdlimit.h b/libtransmission/fdlimit.h
+index 721e6ea3..4bd5cbad 100644
+--- a/libtransmission/fdlimit.h
++++ b/libtransmission/fdlimit.h
+@@ -73,6 +73,8 @@ void tr_fdTorrentClose(tr_session* session, int torrentId);
+  **********************************************************************/
+ tr_socket_t tr_fdSocketCreate(tr_session* session, int domain, int type);
+ 
++int tr_fdGetPeerSocketCount(tr_session const* session);
++
+ tr_socket_t tr_fdSocketAccept(tr_session* session, tr_socket_t listening_sockfd, tr_address* addr, tr_port* port);
+ 
+ void tr_fdSocketClose(tr_session* session, tr_socket_t s);
 diff --git a/libtransmission/inout.cc b/libtransmission/inout.cc
 index ec3e398e..3311d0af 100644
 --- a/libtransmission/inout.cc
@@ -179,10 +208,10 @@ index ec3e398e..3311d0af 100644
          else if (ioMode == TR_IO_PREFETCH)
          {
 diff --git a/libtransmission/inout.h b/libtransmission/inout.h
-index cb215fdb..638e2bb1 100644
+index cb215fdb..174773ee 100644
 --- a/libtransmission/inout.h
 +++ b/libtransmission/inout.h
-@@ -13,6 +13,18 @@
+@@ -13,6 +13,20 @@
  #endif
  
  struct tr_torrent;
@@ -198,22 +227,26 @@ index cb215fdb..638e2bb1 100644
 +void tr_ioSetSuspended(bool suspended);
 +
 +void tr_sessionRefreshDownloadLimit(tr_session* session);
++
++void tr_sessionGetPeerSocketStats(tr_session* session, int* sockets, int* limit, int* peers, int* handshakes);
  
  /**
   * @addtogroup file_io File IO
 diff --git a/libtransmission/peer-mgr.cc b/libtransmission/peer-mgr.cc
-index c3285bfc..93cd50c5 100644
+index c3285bfc..98d8b453 100644
 --- a/libtransmission/peer-mgr.cc
 +++ b/libtransmission/peer-mgr.cc
-@@ -29,6 +29,7 @@
+@@ -28,7 +28,9 @@
+ #include "clients.h"
  #include "completion.h"
  #include "crypto-utils.h"
++#include "fdlimit.h"
  #include "handshake.h"
 +#include "inout.h"
  #include "log.h"
  #include "net.h"
  #include "peer-io.h"
-@@ -827,6 +828,77 @@ static tr_torrent const* weightTorrent;
+@@ -827,6 +829,77 @@ static tr_torrent const* weightTorrent;
  
  static uint16_t const* weightReplication;
  
@@ -291,7 +324,7 @@ index c3285bfc..93cd50c5 100644
  static void setComparePieceByWeightTorrent(tr_swarm* s)
  {
      if (!replicationExists(s))
-@@ -836,6 +908,7 @@ static void setComparePieceByWeightTorrent(tr_swarm* s)
+@@ -836,6 +909,7 @@ static void setComparePieceByWeightTorrent(tr_swarm* s)
  
      weightTorrent = s->tor;
      weightReplication = s->pieceReplication;
@@ -299,7 +332,7 @@ index c3285bfc..93cd50c5 100644
  }
  
  /* we try to create a "weight" s.t. high-priority pieces come before others,
-@@ -847,6 +920,14 @@ static int comparePieceByWeight(void const* va, void const* vb)
+@@ -847,6 +921,14 @@ static int comparePieceByWeight(void const* va, void const* vb)
      tr_torrent const* const tor = weightTorrent;
      uint16_t const* const rep = weightReplication;
  
@@ -314,6 +347,27 @@ index c3285bfc..93cd50c5 100644
      /* primary key: weight */
      int missing = tr_torrentMissingBlocksInPiece(tor, a->index);
      int pending = a->requestCount;
+@@ -2126,6 +2208,20 @@ void tr_peerMgrAddIncoming(tr_peerMgr* manager, tr_address* addr, tr_port port,
+     managerUnlock(manager);
+ }
+ 
++void tr_sessionGetPeerSocketStats(tr_session* session, int* sockets, int* limit, int* peers, int* handshakes)
++{
++    *sockets = tr_fdGetPeerSocketCount(session);
++    *limit = tr_sessionGetPeerLimit(session);
++    *peers = 0;
++    *handshakes = session->peerMgr != nullptr ? tr_ptrArraySize(&session->peerMgr->incomingHandshakes) : 0;
++
++    for (auto const* tor : session->torrents)
++    {
++        *peers += tr_ptrArraySize(&tor->swarm->peers);
++        *handshakes += tr_ptrArraySize(&tor->swarm->outgoingHandshakes);
++    }
++}
++
+ void tr_peerMgrSetSwarmIsAllSeeds(tr_torrent* tor)
+ {
+     tr_torrentLock(tor);
 diff --git a/libtransmission/session.cc b/libtransmission/session.cc
 index 944f46fa..c355e44e 100644
 --- a/libtransmission/session.cc

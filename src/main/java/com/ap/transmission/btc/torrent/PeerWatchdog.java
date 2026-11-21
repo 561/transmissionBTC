@@ -1,19 +1,13 @@
 package com.ap.transmission.btc.torrent;
 
 import static com.ap.transmission.btc.Utils.err;
-
-import android.util.Base64;
+import static com.ap.transmission.btc.Utils.warn;
 
 import com.ap.transmission.btc.Prefs;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -23,35 +17,55 @@ class PeerWatchdog {
   static final long CHECK_PERIOD_SEC = 20;
   private static final long NO_PEERS_MS = 60_000;
   private static final long RETRY_MS = 60_000;
+  private static final long STALL_RESTART_MS = 15 * 60_000;
+  private static final long RESTART_GAP_MS = 60 * 60_000;
+  private static final int LEAK_CHECKS = 3;
+  private static long lastRestart;
 
   private final Transmission transmission;
   private final Prefs prefs;
   private final Map<Integer, Long> noPeersSince = new HashMap<>();
   private final Map<Integer, Long> lastReannounce = new HashMap<>();
-  private String sessionId = "";
+  private final RpcClient rpc;
+  private long stallSince;
+  private int leakChecks;
 
   PeerWatchdog(Transmission transmission, Prefs prefs) {
     this.transmission = transmission;
     this.prefs = prefs;
+    this.rpc = new RpcClient(prefs);
   }
 
   void check() {
     if (!transmission.isRunning() || transmission.isSuspended() || !prefs.isRpcEnabled()) {
       noPeersSince.clear();
+      stallSince = 0;
+      leakChecks = 0;
       return;
     }
 
+    if (checkSocketLeak()) return;
+
     try {
       JSONObject args = new JSONObject().put("fields",
-          new JSONArray().put("id").put("status").put("peersConnected"));
-      JSONArray torrents = call("torrent-get", args).getJSONObject("arguments")
+          new JSONArray().put("id").put("status").put("peersConnected").put("trackerStats"));
+      JSONArray torrents = rpc.call("torrent-get", args).getJSONObject("arguments")
           .getJSONArray("torrents");
       long now = System.currentTimeMillis();
       JSONArray stalled = new JSONArray();
+      int downloading = 0;
+      boolean connected = false;
+      boolean trackerHasPeers = false;
 
       for (int i = 0; i < torrents.length(); i++) {
         JSONObject t = torrents.getJSONObject(i);
         int id = t.getInt("id");
+
+        if (t.getInt("status") == STATUS_DOWNLOAD) {
+          downloading++;
+          if (t.getInt("peersConnected") > 0) connected = true;
+          else if (trackerPeers(t) > 0) trackerHasPeers = true;
+        }
 
         if (t.getInt("status") != STATUS_DOWNLOAD || t.getInt("peersConnected") > 0) {
           noPeersSince.remove(id);
@@ -66,60 +80,65 @@ class PeerWatchdog {
         }
       }
 
+      if (downloading > 0 && !connected && trackerHasPeers) {
+        if (stallSince == 0) stallSince = now;
+        if (now - stallSince >= STALL_RESTART_MS && restart(String.format(java.util.Locale.ROOT,
+            "%d downloading torrents without peers for %d min while trackers report peers",
+            downloading, (now - stallSince) / 60_000))) {
+          return;
+        }
+      } else {
+        stallSince = 0;
+      }
+
       if (stalled.length() > 0) {
-        call("torrent-reannounce", new JSONObject().put("ids", stalled));
+        rpc.call("torrent-reannounce", new JSONObject().put("ids", stalled));
       }
     } catch (Exception ex) {
       err(TAG, ex, "Peer watchdog check failed");
     }
   }
 
-  private JSONObject call(String method, JSONObject args) throws Exception {
-    byte[] body = new JSONObject().put("method", method).put("arguments", args).toString()
-        .getBytes(StandardCharsets.UTF_8);
+  private boolean checkSocketLeak() {
+    int[] s = transmission.getPeerSocketStats();
+    if (s == null || s[1] <= 0) return false;
+    int sockets = s[0], limit = s[1], peers = s[2], handshakes = s[3];
+    int leaked = sockets - peers - handshakes;
 
-    for (int attempt = 0; attempt < 2; attempt++) {
-      URL url = new URL("http://127.0.0.1:" + prefs.getRpcPort() + "/transmission/rpc");
-      HttpURLConnection c = (HttpURLConnection) url.openConnection();
-      try {
-        c.setConnectTimeout(5000);
-        c.setReadTimeout(60000);
-        c.setRequestMethod("POST");
-        c.setDoOutput(true);
-        c.setUseCaches(false);
-        c.setRequestProperty("Connection", "close");
-        c.setRequestProperty("Content-Type", "application/json");
-        c.setFixedLengthStreamingMode(body.length);
-        c.setRequestProperty("X-Transmission-Session-Id", sessionId);
-        if (prefs.isRpcAuthEnabled()) {
-          String cred = prefs.getRpcUsername() + ":" + prefs.getRpcPassword();
-          c.setRequestProperty("Authorization", "Basic "
-              + Base64.encodeToString(cred.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP));
-        }
-        try (OutputStream os = c.getOutputStream()) {
-          os.write(body);
-        }
-
-        int code = c.getResponseCode();
-        if (code == 409) {
-          sessionId = c.getHeaderField("X-Transmission-Session-Id");
-          InputStream es = c.getErrorStream();
-          if (es != null) es.close();
-          continue;
-        }
-        if (code != 200) throw new java.io.IOException("RPC HTTP " + code);
-
-        try (InputStream is = c.getInputStream()) {
-          java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-          byte[] buf = new byte[8192];
-          for (int n; (n = is.read(buf)) > 0; ) out.write(buf, 0, n);
-          return new JSONObject(out.toString("UTF-8"));
-        }
-      } finally {
-        c.disconnect();
-      }
+    if (sockets >= limit * 9 / 10 && leaked >= limit / 2) {
+      leakChecks++;
+      warn(TAG, "Peer sockets near the limit: sockets=%d/%d peers=%d handshakes=%d (check %d)",
+          sockets, limit, peers, handshakes, leakChecks);
+    } else {
+      leakChecks = 0;
     }
 
-    throw new java.io.IOException("Session id negotiation failed");
+    return leakChecks >= LEAK_CHECKS && restart(String.format(java.util.Locale.ROOT,
+        "socket counter at %d/%d with only %d peers and %d handshakes", sockets, limit, peers,
+        handshakes));
+  }
+
+  private static int trackerPeers(JSONObject t) {
+    JSONArray stats = t.optJSONArray("trackerStats");
+    if (stats == null) return 0;
+    int max = 0;
+    for (int i = 0; i < stats.length(); i++) {
+      JSONObject s = stats.optJSONObject(i);
+      if (s != null && s.optBoolean("lastAnnounceSucceeded")) {
+        max = Math.max(max, s.optInt("lastAnnouncePeerCount"));
+      }
+    }
+    return max;
+  }
+
+  private boolean restart(String reason) {
+    long now = System.currentTimeMillis();
+    synchronized (PeerWatchdog.class) {
+      if (lastRestart != 0 && now - lastRestart < RESTART_GAP_MS) return false;
+      lastRestart = now;
+    }
+    warn(TAG, "Engine looks stuck: %s", reason);
+    transmission.restartEngine(reason);
+    return true;
   }
 }

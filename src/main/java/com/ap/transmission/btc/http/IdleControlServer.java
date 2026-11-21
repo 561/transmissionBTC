@@ -1,11 +1,17 @@
 package com.ap.transmission.btc.http;
 
 import static com.ap.transmission.btc.Utils.err;
+import static com.ap.transmission.btc.Utils.info;
 
 import com.ap.transmission.btc.Utils;
+import com.ap.transmission.btc.torrent.RpcClient;
 import com.ap.transmission.btc.torrent.Transmission;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -17,10 +23,12 @@ public class IdleControlServer implements java.io.Closeable {
   public static final int PORT = 9093;
   private static final String TAG = IdleControlServer.class.getName();
   private final Transmission transmission;
+  private final RpcClient rpc;
   private volatile ServerSocket serverSocket;
 
   public IdleControlServer(Transmission transmission) {
     this.transmission = transmission;
+    this.rpc = new RpcClient(transmission.getPrefs());
   }
 
   public void start() throws IOException {
@@ -49,25 +57,45 @@ public class IdleControlServer implements java.io.Closeable {
     if (s != null) Utils.close(s);
   }
 
-  /** Returns "true" or "false" for a path inside the download dir, null for any other path. */
-  private String deleteFile(String query) throws IOException {
-    String raw = null;
+  /** Returns "true" or "false" for a file of a torrent, null when the torrent or file is unknown. */
+  private String deleteFile(String query) throws Exception {
+    int id = -1;
+    int index = -1;
 
     for (String pair : query.split("&")) {
-      if (pair.startsWith("path=")) raw = java.net.URLDecoder.decode(pair.substring(5), "UTF-8");
+      if (pair.startsWith("id=")) id = parseInt(pair.substring(3));
+      else if (pair.startsWith("file=")) index = parseInt(pair.substring(5));
     }
 
-    if (raw == null) return null;
-    java.io.File root = new java.io.File(transmission.getPrefs().getDownloadDir()).getCanonicalFile();
-    java.io.File file = new java.io.File(raw).getCanonicalFile();
-    if (!file.getPath().startsWith(root.getPath() + java.io.File.separator)) return null;
+    if (id < 0 || index < 0) return null;
+    JSONObject args = new JSONObject().put("ids", new JSONArray().put(id))
+        .put("fields", new JSONArray().put("files").put("downloadDir"));
+    JSONArray torrents = rpc.call("torrent-get", args).getJSONObject("arguments")
+        .getJSONArray("torrents");
+    if (torrents.length() == 0) return null;
+    JSONObject torrent = torrents.getJSONObject(0);
+    JSONArray files = torrent.getJSONArray("files");
+    if (index >= files.length()) return null;
+
+    File root = new File(torrent.getString("downloadDir")).getCanonicalFile();
+    File file = new File(root, files.getJSONObject(index).getString("name")).getCanonicalFile();
+    if (!file.getPath().startsWith(root.getPath() + File.separator)) return null;
     boolean deleted = false;
 
-    for (java.io.File candidate : new java.io.File[]{file, new java.io.File(file.getPath() + ".part")}) {
+    for (File candidate : new File[]{file, new File(file.getPath() + ".part")}) {
       if (candidate.isFile() && candidate.delete()) deleted = true;
     }
 
+    info(TAG, "Delete %s: %s", file, deleted);
     return String.valueOf(deleted);
+  }
+
+  private static int parseInt(String value) {
+    try {
+      return Integer.parseInt(value);
+    } catch (NumberFormatException ex) {
+      return -1;
+    }
   }
 
   private void handle(Socket s) {

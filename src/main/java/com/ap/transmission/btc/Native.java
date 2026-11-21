@@ -48,6 +48,8 @@ public class Native {
 
   public static native boolean transmissionHasDownloadingTorrents(long session);
 
+  public static native int[] transmissionPeerSocketStats(long session);
+
   public static native String[] transmissionListTorrentNames(long session);
 
   public static native int transmissionGetEncryptionMode(long session);

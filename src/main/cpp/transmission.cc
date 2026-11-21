@@ -284,6 +284,25 @@ Java_com_ap_transmission_btc_Native_transmissionHasDownloadingTorrents(
 }
 // -------------------------------------------------------------------------------------------------
 
+static void *transmissionPeerSocketStats(tr_session *session, void *data, Err *__unused err) {
+  int *stats = (int *) data;
+  tr_sessionGetPeerSocketStats(session, &stats[0], &stats[1], &stats[2], &stats[3]);
+  return NULL;
+}
+
+JNIEXPORT jintArray JNICALL
+Java_com_ap_transmission_btc_Native_transmissionPeerSocketStats(
+    JNIEnv *env, jclass __unused c, jlong jsession) {
+  jint stats[4] = {0, 0, 0, 0};
+  jintArray result;
+  runInTransmissionThreadEx(env, jsession, transmissionPeerSocketStats, stats);
+  result = env->NewIntArray(4);
+  if (result != NULL) env->SetIntArrayRegion(result, 0, 4, stats);
+  return result;
+  CATCH:
+  return NULL;
+}
+
 // ------------------------------------- ListTorrentNames ------------------------------------------
 typedef struct ListTorrentsData {
     int count;

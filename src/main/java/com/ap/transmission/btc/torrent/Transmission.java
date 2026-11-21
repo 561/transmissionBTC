@@ -6,6 +6,7 @@ import static com.ap.transmission.btc.Utils.debug;
 import static com.ap.transmission.btc.Utils.err;
 import static com.ap.transmission.btc.Utils.info;
 import static com.ap.transmission.btc.Utils.mkdirs;
+import static com.ap.transmission.btc.Utils.warn;
 import static com.ap.transmission.btc.torrent.Transmission.AddTorrentResult.DUPLICATE;
 import static com.ap.transmission.btc.torrent.Transmission.AddTorrentResult.NOT_STARTED;
 import static com.ap.transmission.btc.torrent.Transmission.AddTorrentResult.OK;
@@ -402,7 +403,35 @@ public class Transmission {
 		} catch (IOException ex) {
 			mem.append(" meminfo=").append(ex.getMessage());
 		}
+		int[] sockets = getPeerSocketStats();
+		if (sockets != null) {
+			mem.append(String.format(java.util.Locale.ROOT, " sockets=%d/%d peers=%d handshakes=%d",
+					sockets[0], sockets[1], sockets[2], sockets[3]));
+		}
 		info(TAG, "Status: %s%s", getIdleStatusJson(), mem);
+	}
+
+	@Nullable
+	public int[] getPeerSocketStats() {
+		readLock().lock();
+		try {
+			return isRunning() ? Native.transmissionPeerSocketStats(session) : null;
+		} finally {
+			readLock().unlock();
+		}
+	}
+
+	public void restartEngine(String reason) {
+		new Thread(() -> {
+			warn(TAG, "Restarting the engine: %s", reason);
+			stop();
+			try {
+				start();
+			} catch (Exception ex) {
+				err(TAG, ex, "Engine restart failed");
+			}
+			new Handler(Looper.getMainLooper()).post(TransmissionService::updateNotification);
+		}, "EngineRestart").start();
 	}
 
 	public void onIdleStateChanged(boolean idleChanged) {

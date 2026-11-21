@@ -96,7 +96,7 @@
 
   setInterval(watchReloadLoop, 5000);
 
-  var deleteUrl = location.protocol + '//' + location.hostname + ':9093/file/delete?path=';
+  var deleteUrl = location.protocol + '//' + location.hostname + ':9093/file/delete';
 
   function deleteSelectedFiles() {
     var rows = $('#torrent-files-table').datagrid('getChecked');
@@ -112,20 +112,18 @@
     if (!confirm('Delete ' + indexes.length + ' file(s) from the drive and stop downloading them?')) return;
 
     transmission.exec({ method: 'torrent-set', arguments: { ids: [id], 'files-unwanted': indexes } }, function () {
-      transmission.exec({ method: 'torrent-get', arguments: { ids: [id], fields: ['files', 'downloadDir'] } }, function (res) {
-        var torrent = res.arguments.torrents[0];
-        var dir = torrent.downloadDir.replace(/\/$/, '');
-        var requests = indexes.map(function (i) {
-          return fetch(deleteUrl + encodeURIComponent(dir + '/' + torrent.files[i].name), { method: 'POST' })
-            .then(function (r) { return r.json(); })
-            .catch(function () { return { deleted: false }; });
-        });
+      var requests = indexes.map(function (i) {
+        return fetch(deleteUrl + '?id=' + id + '&file=' + i, { method: 'POST' })
+          .then(function (r) { return r.json(); })
+          .catch(function () { return { deleted: false }; });
+      });
 
-        Promise.all(requests).then(function (results) {
-          var removed = results.filter(function (r) { return r.deleted; }).length;
-          alert('Skipped: ' + indexes.length + ', deleted from the drive: ' + removed);
-          system.reloadData();
-        });
+      Promise.all(requests).then(function (results) {
+        var removed = results.filter(function (r) { return r.deleted; }).length;
+        var message = 'Deleted from the drive: ' + removed + ' of ' + indexes.length;
+        if (removed < indexes.length) message += '\nThe rest were not on the drive or could not be deleted; they will not be downloaded.';
+        alert(message);
+        system.reloadData();
       });
     });
   }
