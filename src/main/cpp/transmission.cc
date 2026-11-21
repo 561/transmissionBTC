@@ -254,6 +254,12 @@ Java_com_ap_transmission_btc_Native_transmissionSuspend(
   runInTransmissionThreadEx(env, jsession, transmissionSuspend, (void *) (intptr_t) suspend);
   CATCH:;
 }
+
+JNIEXPORT void JNICALL
+Java_com_ap_transmission_btc_Native_ioSetSuspended(
+    JNIEnv *__unused env, jclass __unused c, jboolean suspend) {
+  tr_ioSetSuspended(suspend);
+}
 // -------------------------------------------------------------------------------------------------
 
 // -------------------------------- HasDownloadingTorrents -----------------------------------------

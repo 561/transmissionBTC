@@ -46,6 +46,8 @@ public class Native {
 
   public static native void transmissionSuspend(long session, boolean suspend);
 
+  public static native void ioSetSuspended(boolean suspend);
+
   public static native boolean transmissionHasDownloadingTorrents(long session);
 
   public static native int[] transmissionPeerSocketStats(long session);

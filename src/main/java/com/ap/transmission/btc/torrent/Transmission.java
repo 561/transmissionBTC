@@ -345,6 +345,7 @@ public class Transmission {
 	@SuppressLint("StaticFieldLeak")
 	public void suspend(final boolean suspend, final boolean byUser, final Runnable callback) {
 		checkRunning();
+		if (suspend) Native.ioSetSuspended(true);
 		new AsyncTask<Void, Integer, Void>() {
 
 			@Override
