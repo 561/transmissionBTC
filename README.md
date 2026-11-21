@@ -12,6 +12,7 @@ Built and tested on a Google TV Streamer (Android 14, 32-bit ARM) downloading to
 * New setting **"Download only when idle (screensaver or screen off)"**.
 * Downloading starts when the screensaver or screen-off begins and pauses within seconds when someone uses the TV, so playback and navigation never compete with the flash drive.
 * The pause is a gate in `Bandwidth::clamp` set straight from the UI thread: no torrent is stopped and the cache is not flushed, so it takes effect even while the engine thread is blocked on a slow write.
+* While paused no new peer connections are opened (a handshake cannot pass the gate and would mark the peer unreachable for up to hours), and on resume every peer's failure count is cleared so the swarm reconnects at once.
 * App log: daily files in `Android/data/<package>/files/logs/` on internal storage, kept 2 days, with a status line every minute (idle state, `Dirty`, `Writeback`).
 * Manual override from the web UI: **Download now / Pause / Auto**.
 

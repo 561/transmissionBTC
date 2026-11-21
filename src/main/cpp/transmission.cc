@@ -235,6 +235,7 @@ static void *transmissionSuspend(tr_session *session, void *data, Err *__unused 
       }
     }
   } else {
+    tr_sessionClearPeerFailures(session);
     tr_sessionSuspend(session, false);
     for (int id : suspendedChecks) {
       tr_torrent *tor = tr_torrentFindFromId(session, id);

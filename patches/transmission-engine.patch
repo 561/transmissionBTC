@@ -208,10 +208,10 @@ index ec3e398e..3311d0af 100644
          else if (ioMode == TR_IO_PREFETCH)
          {
 diff --git a/libtransmission/inout.h b/libtransmission/inout.h
-index cb215fdb..174773ee 100644
+index cb215fdb..ae219b68 100644
 --- a/libtransmission/inout.h
 +++ b/libtransmission/inout.h
-@@ -13,6 +13,20 @@
+@@ -13,6 +13,22 @@
  #endif
  
  struct tr_torrent;
@@ -228,12 +228,14 @@ index cb215fdb..174773ee 100644
 +
 +void tr_sessionRefreshDownloadLimit(tr_session* session);
 +
++void tr_sessionClearPeerFailures(tr_session* session);
++
 +void tr_sessionGetPeerSocketStats(tr_session* session, int* sockets, int* limit, int* peers, int* handshakes);
  
  /**
   * @addtogroup file_io File IO
 diff --git a/libtransmission/peer-mgr.cc b/libtransmission/peer-mgr.cc
-index c3285bfc..98d8b453 100644
+index c3285bfc..51c599c5 100644
 --- a/libtransmission/peer-mgr.cc
 +++ b/libtransmission/peer-mgr.cc
 @@ -28,7 +28,9 @@
@@ -347,10 +349,26 @@ index c3285bfc..98d8b453 100644
      /* primary key: weight */
      int missing = tr_torrentMissingBlocksInPiece(tor, a->index);
      int pending = a->requestCount;
-@@ -2126,6 +2208,20 @@ void tr_peerMgrAddIncoming(tr_peerMgr* manager, tr_address* addr, tr_port port,
+@@ -2126,6 +2208,36 @@ void tr_peerMgrAddIncoming(tr_peerMgr* manager, tr_address* addr, tr_port port,
      managerUnlock(manager);
  }
  
++void tr_sessionClearPeerFailures(tr_session* session)
++{
++    for (auto* tor : session->torrents)
++    {
++        auto atomCount = int{};
++        struct peer_atom** atoms = (struct peer_atom**)tr_ptrArrayPeek(&tor->swarm->pool, &atomCount);
++
++        for (int i = 0; i < atomCount; ++i)
++        {
++            atoms[i]->numFails = 0;
++            atoms[i]->flags2 &= ~MYFLAG_UNREACHABLE;
++            atoms[i]->time = 0;
++        }
++    }
++}
++
 +void tr_sessionGetPeerSocketStats(tr_session* session, int* sockets, int* limit, int* peers, int* handshakes)
 +{
 +    *sockets = tr_fdGetPeerSocketCount(session);
@@ -368,6 +386,18 @@ index c3285bfc..98d8b453 100644
  void tr_peerMgrSetSwarmIsAllSeeds(tr_torrent* tor)
  {
      tr_torrentLock(tor);
+@@ -4284,6 +4396,11 @@ static void initiateCandidateConnection(tr_peerMgr* mgr, struct peer_candidate*
+ 
+ static void makeNewPeerConnections(struct tr_peerMgr* mgr, int const max)
+ {
++    if (tr_ioSuspended())
++    {
++        return;
++    }
++
+     auto n = int{};
+     struct peer_candidate* candidates = getPeerCandidates(mgr->session, &n, max);
+ 
 diff --git a/libtransmission/session.cc b/libtransmission/session.cc
 index 944f46fa..c355e44e 100644
 --- a/libtransmission/session.cc
