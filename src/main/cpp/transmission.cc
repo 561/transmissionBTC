@@ -112,6 +112,7 @@ static void *transmissionStart(tr_session *session, void *data, Err *__unused er
   tr_ctor *ctor = tr_ctorNew(session);
   torrents = tr_sessionLoadTorrents(session, ctor, NULL);
   tr_ioSetSuspended(suspend);
+  tr_sessionRefreshDownloadLimit(session);
   tr_sessionSuspend(session, suspend);
   tr_free(torrents);
   tr_ctorFree(ctor);
@@ -224,6 +225,7 @@ static std::vector<int> suspendedChecks;
 
 static void *transmissionSuspend(tr_session *session, void *data, Err *__unused err) {
   bool suspend = (bool) data;
+  tr_sessionRefreshDownloadLimit(session);
 
   if (suspend) {
     for (auto tor : session->torrents) {
