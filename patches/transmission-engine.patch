@@ -202,7 +202,7 @@ index efba7a2..986f847 100644
      else
      {
 diff --git a/libtransmission/peer-mgr-wishlist.cc b/libtransmission/peer-mgr-wishlist.cc
-index 5cb5732..d6a0486 100644
+index 5cb5732..84f5169 100644
 --- a/libtransmission/peer-mgr-wishlist.cc
 +++ b/libtransmission/peer-mgr-wishlist.cc
 @@ -60,6 +60,7 @@ class Wishlist::Impl
@@ -262,17 +262,28 @@ index 5cb5732..d6a0486 100644
      candidate_list_upkeep();
  }
  
-@@ -613,6 +633,11 @@ std::vector<tr_block_span_t> Wishlist::Impl::next(
+@@ -613,8 +633,7 @@ std::vector<tr_block_span_t> Wishlist::Impl::next(
  
  int Wishlist::Impl::Candidate::compare(Candidate const& that) const noexcept
  {
+-    // prefer pieces closer to completion
+-    if (auto const val = tr_compare_3way(std::size(unrequested), std::size(that.unrequested)); val != 0)
 +    if (auto const val = tr_compare_3way(window, that.window); val != 0)
+     {
+         return val;
+     }
+@@ -625,6 +644,12 @@ int Wishlist::Impl::Candidate::compare(Candidate const& that) const noexcept
+         return -val;
+     }
+ 
++    // prefer pieces closer to completion
++    if (auto const val = tr_compare_3way(std::size(unrequested), std::size(that.unrequested)); val != 0)
 +    {
 +        return val;
 +    }
 +
-     // prefer pieces closer to completion
-     if (auto const val = tr_compare_3way(std::size(unrequested), std::size(that.unrequested)); val != 0)
+     // prefer rarer pieces
+     if (auto const val = tr_compare_3way(replication, that.replication); val != 0)
      {
 diff --git a/libtransmission/peer-mgr-wishlist.h b/libtransmission/peer-mgr-wishlist.h
 index ae2f5fb..8c0e322 100644
@@ -295,7 +306,7 @@ index ae2f5fb..8c0e322 100644
              libtransmission::SimpleObservable<tr_torrent*, tr_file_index_t const*, tr_file_index_t, bool>::Observer) = 0;
          [[nodiscard]] virtual libtransmission::ObserverTag observe_peer_disconnect(
 diff --git a/libtransmission/peer-mgr.cc b/libtransmission/peer-mgr.cc
-index 0aa4f8f..aff1583 100644
+index 0aa4f8f..8b4ef97 100644
 --- a/libtransmission/peer-mgr.cc
 +++ b/libtransmission/peer-mgr.cc
 @@ -54,6 +54,8 @@
@@ -316,16 +327,29 @@ index 0aa4f8f..aff1583 100644
  
          [[nodiscard]] libtransmission::ObserverTag observe_files_wanted_changed(
              libtransmission::SimpleObservable<tr_torrent*, tr_file_index_t const*, tr_file_index_t, bool>::Observer observer)
-@@ -425,6 +429,8 @@ public:
+@@ -423,8 +427,21 @@ public:
+             libtransmission::SimpleObservable<tr_torrent*, tr_piece_index_t>::Observer observer) override;
+ 
      private:
++        struct DiskExtent
++        {
++            uint64_t size = 0;
++            time_t checked_at = 0;
++        };
++
++        static auto constexpr DiskExtentTtlSec = 30;
++
++        [[nodiscard]] uint64_t disk_extent(tr_file_index_t file_index) const;
++
          tr_torrent& tor_;
          tr_swarm& swarm_;
 +        std::vector<uint64_t> file_frontier_;
++        mutable std::vector<DiskExtent> disk_extent_;
 +        uint64_t window_bytes_ = 0;
      };
  
      [[nodiscard]] auto unique_lock() const
-@@ -1008,6 +1014,59 @@ bool tr_swarm::WishlistMediator::client_has_block(tr_block_index_t block) const
+@@ -1008,6 +1025,83 @@ bool tr_swarm::WishlistMediator::client_has_block(tr_block_index_t block) const
      return tor_.has_block(block);
  }
  
@@ -339,6 +363,7 @@ index 0aa4f8f..aff1583 100644
 +    }
 +
 +    file_frontier_.assign(tor_.file_count(), 0U);
++    disk_extent_.resize(tor_.file_count());
 +    for (tr_piece_index_t piece = 0U, n = tor_.piece_count(); piece < n; ++piece)
 +    {
 +        if (!tor_.has_piece(piece))
@@ -350,6 +375,24 @@ index 0aa4f8f..aff1583 100644
 +        auto const end = std::min<uint64_t>(file_offset + tor_.piece_size(piece), tor_.file_size(file_index));
 +        file_frontier_[file_index] = std::max(file_frontier_[file_index], end);
 +    }
++}
++
++uint64_t tr_swarm::WishlistMediator::disk_extent(tr_file_index_t const file_index) const
++{
++    if (file_index >= std::size(disk_extent_))
++    {
++        return 0U;
++    }
++
++    auto& extent = disk_extent_[file_index];
++    if (auto const now = tr_time(); extent.checked_at == 0 || now - extent.checked_at >= DiskExtentTtlSec)
++    {
++        auto const found = tor_.find_file(file_index);
++        extent.size = found ? found->size : 0U;
++        extent.checked_at = now;
++    }
++
++    return extent.size;
 +}
 +
 +int tr_swarm::WishlistMediator::piece_window_rank(tr_piece_index_t piece) const
@@ -365,7 +408,12 @@ index 0aa4f8f..aff1583 100644
 +        return 0;
 +    }
 +
-+    auto const frontier = file_frontier_[file_index];
++    auto frontier = file_frontier_[file_index];
++    if (file_offset > frontier + window_bytes_)
++    {
++        frontier = std::max(frontier, disk_extent(file_index));
++    }
++
 +    if (file_offset <= frontier + window_bytes_)
 +    {
 +        return 0;
@@ -385,7 +433,7 @@ index 0aa4f8f..aff1583 100644
  bool tr_swarm::WishlistMediator::client_has_piece(tr_piece_index_t piece) const
  {
      return tor_.has_blocks(block_span(piece));
-@@ -1226,6 +1285,11 @@ public:
+@@ -1226,6 +1320,11 @@ public:
  
      HandshakeMediator handshake_mediator_;
  
@@ -397,7 +445,7 @@ index 0aa4f8f..aff1583 100644
  private:
      void bandwidth_pulse();
      void make_new_peer_connections();
-@@ -2816,6 +2880,11 @@ void tr_peerMgr::make_new_peer_connections()
+@@ -2816,6 +2915,11 @@ void tr_peerMgr::make_new_peer_connections()
  {
      using namespace connect_helpers;
  
@@ -409,7 +457,7 @@ index 0aa4f8f..aff1583 100644
      auto const lock = unique_lock();
  
      // get the candidates if we need to
-@@ -2854,3 +2923,48 @@ void HandshakeMediator::set_utp_failed(tr_sha1_digest_t const& info_hash, tr_soc
+@@ -2854,3 +2958,48 @@ void HandshakeMediator::set_utp_failed(tr_sha1_digest_t const& info_hash, tr_soc
          }
      }
  }

@@ -30,7 +30,7 @@ Built and tested on a Google TV Streamer (Android 14, 32-bit ARM) downloading to
 ### Lag fixes for slow USB flash drives (exFAT / FUSE)
 * **No preallocation.** Android's exFAT FUSE layer zero-fills when a file is extended, which blocks the drive for minutes on multi-GB files.
 * **Dirty-page throttle.** A 100 ms monitor reads `Dirty + Writeback` from `/proc/meminfo`. At 16 MB (configurable with `TRANSMISSION_MAX_DIRTY_MB`) downloading is throttled immediately inside `Bandwidth::clamp`, and released below half of that. This keeps the kernel write queue short, so the engine and web UI never wait on the drive.
-* **Piece window.** Pieces more than 16 MiB (`TRANSMISSION_PIECE_WINDOW_MB`) ahead of the written data are requested last, so a write never lands far beyond the end of the file and exFAT has no big gap to zero-fill.
+* **Piece window.** Pieces more than 16 MiB (`TRANSMISSION_PIECE_WINDOW_MB`) ahead of the written data are requested last, so a write never lands far beyond the end of the file and exFAT has no big gap to zero-fill. A file that is already that long on disk does not hold its pieces back, and within the window higher-priority pieces are requested before pieces closer to completion.
 * The engine changes live in [`patches/transmission-engine.patch`](patches/transmission-engine.patch), applied on top of Transmission 4.1.4 (fetched by the native build).
 
 ### Reliability
