@@ -1,3 +1,6 @@
+#include <fstream>
+#include <set>
+#include <string>
 #include <vector>
 #include "commons.h"
 #include "native_to_java.h"
@@ -5,25 +8,63 @@
 #include <libtransmission/version.h>
 #include <libtransmission/variant.h>
 #include <libtransmission/file.h>
-#include <libtransmission/inout.h>
+#include <libtransmission/utils.h>
 
-#define MEM_K 1024
-#define MEM_K_STR "KiB"
-#define MEM_M_STR "MiB"
-#define MEM_G_STR "GiB"
-#define MEM_T_STR "TiB"
+static std::string configDirPath;
+static std::set<std::string> suspendedHashes;
 
-#define DISK_K 1000
-#define DISK_K_STR "kB"
-#define DISK_M_STR "MB"
-#define DISK_G_STR "GB"
-#define DISK_T_STR "TB"
+static std::string suspendedFile() {
+  return configDirPath + "/suspended.txt";
+}
 
-#define SPEED_K 1000
-#define SPEED_K_STR "kB/s"
-#define SPEED_M_STR "MB/s"
-#define SPEED_G_STR "GB/s"
-#define SPEED_T_STR "TB/s"
+static void loadSuspended() {
+  suspendedHashes.clear();
+  std::ifstream in(suspendedFile());
+  std::string line;
+  while (std::getline(in, line)) {
+    if (!line.empty()) suspendedHashes.insert(line);
+  }
+}
+
+static void saveSuspended() {
+  if (suspendedHashes.empty()) {
+    remove(suspendedFile().c_str());
+    return;
+  }
+
+  std::ofstream out(suspendedFile(), std::ios::trunc);
+  for (auto const &hash : suspendedHashes) out << hash << "\n";
+}
+
+static void sessionSuspend(tr_session *session, bool suspend) {
+  tr_sessionSetPaused(session, suspend);
+
+  if (suspend) {
+    for (auto *tor : session->torrents()) {
+      if (tor->is_running()) {
+        suspendedHashes.insert(std::string{tor->info_hash_string()});
+        tr_torrentStop(tor);
+      }
+    }
+  } else {
+    for (auto *tor : session->torrents()) {
+      if (suspendedHashes.count(std::string{tor->info_hash_string()}) != 0) tr_torrentStart(tor);
+    }
+
+    suspendedHashes.clear();
+  }
+
+  saveSuspended();
+}
+
+static void saveSessionSettings(tr_session *session) {
+  tr_sessionSaveSettings(session, tr_sessionGetConfigDir(session), tr_variant::make_map());
+}
+
+static void metadataFunc(tr_session *__unused session, tr_torrent *__unused tor, void *__unused data) {
+  torrentMetadataReceived(tor);
+  callAddedOrChangedCallback();
+}
 
 extern "C" {
 
@@ -33,48 +74,12 @@ Java_com_ap_transmission_btc_Native_transmissionVersion(JNIEnv *env, jclass __un
 }
 
 // ----------------------------------------- Start -------------------------------------------------
-typedef struct OrigMetaDataFunc {
-    tr_torrent_metadata_func metadata_func;
-    void *metadata_func_user_data;
-} OrigMetaDataFunc;
-
-static void metadataFunc(tr_torrent *torrent, void *user_data) {
-  OrigMetaDataFunc *origData = (OrigMetaDataFunc *) user_data;
-
-  if (origData != NULL) {
-    origData->metadata_func(torrent, origData->metadata_func_user_data);
-    free(origData);
-  }
-
-  callAddedOrChangedCallback();
-}
-
-static void saveSessionSettings(tr_session *session) {
-  tr_variant settings;
-  tr_variantInitDict(&settings, 0);
-  tr_sessionGetSettings(session, &settings);
-  tr_sessionSaveSettings(session, tr_sessionGetConfigDir(session), &settings);
-  tr_variantFree(&settings);
-}
 
 static tr_rpc_callback_status rpcFunc(tr_session *session, tr_rpc_callback_type type,
-                                      struct tr_torrent *tor,
+                                      struct tr_torrent *__unused tor,
                                       void *__unused user_data) {
   switch (type) {
     case TR_RPC_TORRENT_ADDED:
-      if ((tor != NULL) && !tr_torrentHasMetadata(tor)) {
-        tr_torrent_metadata_func mdFunc = (tr_torrent_metadata_func) tor->metadata_func_user_data;
-        OrigMetaDataFunc *origData = NULL;
-
-        if (mdFunc != NULL) {
-          origData = (OrigMetaDataFunc *) malloc(sizeof(OrigMetaDataFunc));
-          origData->metadata_func = mdFunc;
-          origData->metadata_func_user_data = tor->metadata_func_user_data;
-        }
-
-        tor->metadata_func = metadataFunc;
-        tor->metadata_func_user_data = origData;
-      }
     case TR_RPC_TORRENT_STARTED:
     case TR_RPC_TORRENT_MOVED:
     case TR_RPC_TORRENT_CHANGED:
@@ -106,16 +111,15 @@ static void *transmissionStart(tr_session *session, void *data, Err *__unused er
   tr_sessionSetPaused(session, false);
   tr_sessionSetRPCCallback(session, rpcFunc, NULL);
   tr_sessionSetAltSpeedFunc(session, altSpeedFunc, NULL);
+  tr_sessionSetMetadataCallback(session, metadataFunc, NULL);
 
-  /* load the torrents */
-  tr_torrent **torrents;
   tr_ctor *ctor = tr_ctorNew(session);
-  torrents = tr_sessionLoadTorrents(session, ctor, NULL);
+  tr_sessionLoadTorrents(session, ctor);
+  tr_ctorFree(ctor);
   tr_ioSetSuspended(suspend);
   tr_sessionRefreshDownloadLimit(session);
-  tr_sessionSuspend(session, suspend);
-  tr_free(torrents);
-  tr_ctorFree(ctor);
+  loadSuspended();
+  sessionSuspend(session, suspend);
   return NULL;
 }
 
@@ -128,20 +132,19 @@ Java_com_ap_transmission_btc_Native_transmissionStart(
     jboolean enableAuth, jstring jusername, jstring jpassword,
     jboolean enableRpcWhitelist, jstring jrpcWhitelist,
     jboolean loadConfig, jboolean enableSequential, jboolean suspend) {
-  tr_variant settings;
   tr_session *session;
+  tr_lib_init();
   const char *configDir = env->GetStringUTFChars(jconfigDir, 0);
-  tr_variantInitDict(&settings, 0);
+  configDirPath = configDir;
+  tr_variant settings = loadConfig ? tr_sessionLoadSettings(configDir) : tr_variant::make_map();
 
-  if (loadConfig) {
-    if (!tr_sessionLoadSettings(&settings, configDir, "transmissionbtc")) {
-      logErr("Failed to load config: %s/settings.json", configDir);
-      loadConfig = false;
-    }
+  if (!settings.holds_alternative<tr_variant::Map>()) {
+    logErr("Failed to load config: %s/settings.json", configDir);
+    settings = tr_variant::make_map();
+    loadConfig = false;
   }
 
   if (!loadConfig) {
-    // Set defaults
     tr_variantDictAddBool(&settings, TR_KEY_rename_partial_files, false);
     tr_variantDictAddBool(&settings, TR_KEY_peer_port_random_on_start, true);
   }
@@ -151,9 +154,8 @@ Java_com_ap_transmission_btc_Native_transmissionStart(
   env->ReleaseStringUTFChars(jdownloadsDir, downloadsDir);
 
   tr_variantDictAddInt(&settings, TR_KEY_encryption, encrMode);
-  tr_variantDictRemove(&settings, TR_KEY_preallocation);
-  tr_variantDictAddInt(&settings, TR_KEY_preallocation, TR_PREALLOCATE_NONE);
-  tr_variantDictAddBool(&settings, TR_KEY_sequentialDownload, enableSequential);
+  tr_variantDictAddInt(&settings, TR_KEY_preallocation, 0);
+  tr_variantDictAddBool(&settings, TR_KEY_sequential_download, enableSequential);
 
   if (enableRpc) {
     tr_variantDictAddBool(&settings, TR_KEY_rpc_enabled, true);
@@ -183,13 +185,9 @@ Java_com_ap_transmission_btc_Native_transmissionStart(
     tr_variantDictAddBool(&settings, TR_KEY_rpc_enabled, false);
   }
 
-  tr_formatter_mem_init(MEM_K, MEM_K_STR, MEM_M_STR, MEM_G_STR, MEM_T_STR);
-  tr_formatter_size_init(DISK_K, DISK_K_STR, DISK_M_STR, DISK_G_STR, DISK_T_STR);
-  tr_formatter_speed_init(SPEED_K, SPEED_K_STR, SPEED_M_STR, SPEED_G_STR, SPEED_T_STR);
-  session = tr_sessionInit(configDir, true, &settings);
-  tr_sessionSaveSettings(session, configDir, &settings);
+  session = tr_sessionInit(configDir, true, settings);
+  tr_sessionSaveSettings(session, configDir, tr_variant::make_map());
   env->ReleaseStringUTFChars(jconfigDir, configDir);
-  tr_variantFree(&settings);
 
   jlong jsession = (jlong) session;
   runInTransmissionThreadEx(env, jsession, transmissionStart, (void *) (intptr_t) suspend);
@@ -204,18 +202,14 @@ Java_com_ap_transmission_btc_Native_transmissionStart(
 JNIEXPORT void JNICALL
 Java_com_ap_transmission_btc_Native_transmissionStop(
     JNIEnv *__unused env, jclass __unused c, jlong jsession, jstring jconfigDir) {
-  tr_variant settings;
   tr_session *session = (tr_session *) jsession;
-  session->rpc_func_user_data = NULL;
-
-  tr_variantInitDict(&settings, 0);
-  tr_sessionGetSettings(session, &settings);
+  tr_sessionSetRPCCallback(session, NULL, NULL);
+  tr_sessionSetMetadataCallback(session, NULL, NULL);
 
   const char *configDir = env->GetStringUTFChars(jconfigDir, 0);
-  tr_sessionSaveSettings(session, configDir, &settings);
+  tr_sessionSaveSettings(session, configDir, tr_variant::make_map());
   env->ReleaseStringUTFChars(jconfigDir, configDir);
 
-  tr_variantFree(&settings);
   tr_sessionClose(session);
 }
 // -------------------------------------------------------------------------------------------------
@@ -228,20 +222,20 @@ static void *transmissionSuspend(tr_session *session, void *data, Err *__unused 
   tr_sessionRefreshDownloadLimit(session);
 
   if (suspend) {
-    for (auto tor : session->torrents) {
-      tr_torrent_activity activity = tr_torrentGetActivity(tor);
+    for (auto *tor : session->torrents()) {
+      tr_torrent_activity activity = tor->activity();
 
       if (activity == TR_STATUS_CHECK || activity == TR_STATUS_CHECK_WAIT) {
-        suspendedChecks.push_back(tor->uniqueId);
+        suspendedChecks.push_back(tr_torrentId(tor));
         tr_torrentStop(tor);
       }
     }
   } else {
     tr_sessionClearPeerFailures(session);
-    tr_sessionSuspend(session, false);
+    sessionSuspend(session, false);
     for (int id : suspendedChecks) {
       tr_torrent *tor = tr_torrentFindFromId(session, id);
-      if (tor != nullptr) tr_torrentVerify(tor, nullptr, nullptr);
+      if (tor != nullptr) tr_torrentVerify(tor);
     }
 
     suspendedChecks.clear();
@@ -268,8 +262,8 @@ Java_com_ap_transmission_btc_Native_ioSetSuspended(
 // -------------------------------- HasDownloadingTorrents -----------------------------------------
 static void *
 transmissionHasDownloadingTorrents(tr_session *session, void *__unused data, Err *__unused err) {
-  for (auto tor : session->torrents) {
-    switch (tr_torrentGetActivity(tor)) {
+  for (auto *tor : session->torrents()) {
+    switch (tor->activity()) {
       case TR_STATUS_DOWNLOAD:
       case TR_STATUS_DOWNLOAD_WAIT:
       case TR_STATUS_CHECK:
@@ -321,17 +315,17 @@ typedef struct ListTorrentsData {
 static void *
 transmissionListTorrentNames(tr_session *session, void *data, Err *__unused err) {
   ListTorrentsData *d = (ListTorrentsData *) data;
-  d->count = session->torrents.size();
+  d->count = (int) std::size(session->torrents());
   if (d->count == 0) return NULL;
   d->torrents = (char **) malloc(d->count * (sizeof(char *)));
   int i = 0;
 
-  for (auto tor : session->torrents) {
-    size_t hashLen = sizeof(tor->info.hashString);
-    size_t nameLen = strlen(tor->info.name);
-    size_t lineLen = hashLen + nameLen + 12;
+  for (auto *tor : session->torrents()) {
+    std::string const hash{tor->info_hash_string()};
+    char const *name = tr_torrentName(tor);
+    size_t lineLen = hash.size() + strlen(name) + 16;
     char *line = (char *) malloc(lineLen);
-    snprintf(line, lineLen, "%d %s %s", tr_torrentId(tor), tor->info.hashString, tor->info.name);
+    snprintf(line, lineLen, "%d %s %s", tr_torrentId(tor), hash.c_str(), name);
     d->torrents[i++] = line;
   }
 
@@ -341,7 +335,7 @@ transmissionListTorrentNames(tr_session *session, void *data, Err *__unused err)
 JNIEXPORT jobjectArray JNICALL
 Java_com_ap_transmission_btc_Native_transmissionListTorrentNames(
     JNIEnv *__unused env, jclass __unused c, jlong jsession) {
-  ListTorrentsData d;
+  ListTorrentsData d = {0, NULL};
   jobjectArray result = NULL;
   runInTransmissionThreadEx(env, jsession, transmissionListTorrentNames, &d);
 

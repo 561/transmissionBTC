@@ -1,106 +1,615 @@
+diff --git a/libtransmission/CMakeLists.txt b/libtransmission/CMakeLists.txt
+index 3cd3380..3e24433 100644
+--- a/libtransmission/CMakeLists.txt
++++ b/libtransmission/CMakeLists.txt
+@@ -69,6 +69,8 @@ target_sources(${TR_NAME}
+         history.h
+         inout.cc
+         inout.h
++        tv-io.cc
++        tv-io.h
+         ip-cache.cc
+         ip-cache.h
+         log.cc
 diff --git a/libtransmission/bandwidth.cc b/libtransmission/bandwidth.cc
-index e02e3ba5..4e2226f0 100644
+index c71e397..3c32f0c 100644
 --- a/libtransmission/bandwidth.cc
 +++ b/libtransmission/bandwidth.cc
-@@ -11,6 +11,7 @@
+@@ -24,6 +24,7 @@
+ #include "libtransmission/tr-assert.h"
+ #include "libtransmission/utils.h" // tr_time_msec()
+ #include "libtransmission/values.h"
++#include "libtransmission/tv-io.h"
  
- #include "transmission.h"
- #include "bandwidth.h"
-+#include "inout.h"
- #include "crypto-utils.h" /* tr_rand_int_weak() */
- #include "log.h"
- #include "peer-io.h"
-@@ -242,6 +243,11 @@ unsigned int Bandwidth::clamp(uint64_t now, tr_direction dir, unsigned int byte_
+ using namespace libtransmission::Values;
+ 
+@@ -279,6 +280,11 @@ size_t tr_bandwidth::clamp(tr_direction const dir, size_t byte_count) const noex
  {
      TR_ASSERT(tr_isDirection(dir));
  
 +    if (tr_ioSuspended() || (dir == TR_DOWN && tr_ioDownloadThrottled()))
 +    {
++        return 0U;
++    }
++
+     if (band_[dir].is_limited_)
+     {
+         byte_count = std::min(byte_count, band_[dir].bytes_left_);
+diff --git a/libtransmission/file-posix.cc b/libtransmission/file-posix.cc
+index 271e5f2..19da0bf 100644
+--- a/libtransmission/file-posix.cc
++++ b/libtransmission/file-posix.cc
+@@ -8,6 +8,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
+ #include <cerrno>
+ #include <climits> /* PATH_MAX */
+ #include <cstdint> /* SIZE_MAX */
+@@ -308,12 +309,27 @@ std::string_view tr_sys_path_dirname(std::string_view path)
+     return path.substr(0, end);
+ }
+ 
++#ifdef __ANDROID__
++namespace
++{
++std::atomic<bool> android_files_opened{ false };
++}
++#endif
++
+ bool tr_sys_path_rename(char const* src_path, char const* dst_path, tr_error* error)
+ {
+     TR_ASSERT(src_path != nullptr);
+     TR_ASSERT(dst_path != nullptr);
+ 
+-    bool const ret = rename(src_path, dst_path) != -1;
++    bool ret = rename(src_path, dst_path) != -1;
++
++#ifdef __ANDROID__
++    if (!ret && tr_android_path_rename(src_path, dst_path))
++    {
++        errno = 0;
++        ret = true;
++    }
++#endif
+ 
+     if (error != nullptr && !ret)
+     {
+@@ -533,7 +549,15 @@ bool tr_sys_path_remove(char const* path, tr_error* error)
+ {
+     TR_ASSERT(path != nullptr);
+ 
+-    bool const ret = remove(path) != -1;
++    bool ret = remove(path) != -1;
++
++#ifdef __ANDROID__
++    if (!ret && access(path, F_OK) == 0 && tr_android_path_remove(path))
++    {
++        errno = 0;
++        ret = true;
++    }
++#endif
+ 
+     if (error != nullptr && !ret)
+     {
+@@ -579,7 +603,15 @@ tr_sys_file_t tr_sys_file_open(char const* path, int flags, int permissions, tr_
+         }
+     }
+ 
+-    tr_sys_file_t const ret = open(path, native_flags, permissions);
++    tr_sys_file_t ret = open(path, native_flags, permissions);
++
++#ifdef __ANDROID__
++    if (ret == TR_BAD_SYS_FILE && (ret = tr_android_file_open(path, flags)) != TR_BAD_SYS_FILE)
++    {
++        errno = 0;
++        android_files_opened = true;
++    }
++#endif
+ 
+     if (ret != TR_BAD_SYS_FILE)
+     {
+@@ -600,7 +632,15 @@ tr_sys_file_t tr_sys_file_open_temp(char* path_template, tr_error* error)
+ {
+     TR_ASSERT(path_template != nullptr);
+ 
+-    tr_sys_file_t const ret = mkstemp(path_template);
++    tr_sys_file_t ret = mkstemp(path_template);
++
++#ifdef __ANDROID__
++    if (ret == TR_BAD_SYS_FILE && (ret = tr_android_file_open_temp(path_template)) != TR_BAD_SYS_FILE)
++    {
++        errno = 0;
++        android_files_opened = true;
++    }
++#endif
+ 
+     if (error != nullptr && ret == TR_BAD_SYS_FILE)
+     {
+@@ -616,6 +656,13 @@ bool tr_sys_file_close(tr_sys_file_t handle, tr_error* error)
+ {
+     TR_ASSERT(handle != TR_BAD_SYS_FILE);
+ 
++#ifdef __ANDROID__
++    if (android_files_opened && tr_android_file_close(handle))
++    {
++        return true;
++    }
++#endif
++
+     bool const ret = close(handle) != -1;
+ 
+     if (error != nullptr && !ret)
+@@ -1088,6 +1135,15 @@ bool tr_sys_dir_create(char const* path, int flags, int permissions, tr_error* e
+         ret = mkdir(path, permissions) != -1;
+     }
+ 
++#ifdef __ANDROID__
++    if (!ret && errno != EEXIST && tr_android_dir_create(path))
++    {
++        local_error = {};
++        errno = 0;
++        ret = true;
++    }
++#endif
++
+     if (!ret && errno == EEXIST)
+     {
+         if (auto const info = tr_sys_path_get_info(path); info && info->type == TR_SYS_PATH_IS_DIRECTORY)
+diff --git a/libtransmission/file.h b/libtransmission/file.h
+index 85e8786..22e2b34 100644
+--- a/libtransmission/file.h
++++ b/libtransmission/file.h
+@@ -254,6 +254,15 @@ std::string_view tr_sys_path_dirname(std::string_view path);
+  *         Rename will generally only succeed if both source and destination are
+  *         on the same partition.
+  */
++#ifdef __ANDROID__
++bool tr_android_path_rename(char const* src_path, char const* dst_path);
++bool tr_android_path_remove(char const* path);
++tr_sys_file_t tr_android_file_open(char const* path, int flags);
++tr_sys_file_t tr_android_file_open_temp(char* path_template);
++bool tr_android_file_close(tr_sys_file_t handle);
++bool tr_android_dir_create(char const* path);
++#endif
++
+ bool tr_sys_path_rename(char const* src_path, char const* dst_path, tr_error* error = nullptr);
+ 
+ template<typename T, typename U, typename = decltype(&T::c_str), typename = decltype(&U::c_str)>
+diff --git a/libtransmission/inout.cc b/libtransmission/inout.cc
+index efba7a2..986f847 100644
+--- a/libtransmission/inout.cc
++++ b/libtransmission/inout.cc
+@@ -19,6 +19,7 @@
+ #include "libtransmission/error.h"
+ #include "libtransmission/file.h"
+ #include "libtransmission/inout.h"
++#include "libtransmission/tv-io.h"
+ #include "libtransmission/session.h"
+ #include "libtransmission/torrent.h"
+ #include "libtransmission/torrent-files.h"
+@@ -152,7 +153,10 @@ void read_or_write_bytes(
+     if (writable)
+     {
+         fmtstr = _("Couldn't save '{path}': {error} ({error_code})");
+-        write_entire_buf(*fd, file_offset, buf, buflen, error);
++        if (write_entire_buf(*fd, file_offset, buf, buflen, error))
++        {
++            tr_ioStartDirtyMonitor(&session);
++        }
+     }
+     else
+     {
+diff --git a/libtransmission/peer-mgr-wishlist.cc b/libtransmission/peer-mgr-wishlist.cc
+index 5cb5732..d6a0486 100644
+--- a/libtransmission/peer-mgr-wishlist.cc
++++ b/libtransmission/peer-mgr-wishlist.cc
+@@ -60,6 +60,7 @@ class Wishlist::Impl
+             , replication{ mediator->count_piece_replication(piece_in) }
+             , priority{ mediator->priority(piece_in) }
+             , salt{ salt_in }
++            , window{ mediator->piece_window_rank(piece_in) }
+         {
+             unrequested.reserve(block_span.end - block_span.begin);
+             for (auto [begin, i] = block_span; i > begin; --i)
+@@ -101,6 +102,8 @@ class Wishlist::Impl
+         tr_priority_t priority;
+ 
+         tr_piece_index_t salt;
++
++        int window;
+     };
+ 
+     using CandidateVec = std::vector<Candidate>;
+@@ -362,6 +365,17 @@ private:
+ 
+     // ---
+ 
++    void refresh_window()
++    {
++        mediator_.refresh_piece_window();
++        for (auto& candidate : candidates_)
++        {
++            candidate.window = mediator_.piece_window_rank(candidate.piece);
++        }
++
++        std::sort(std::begin(candidates_), std::end(candidates_));
++    }
++
+     void candidate_list_upkeep()
+     {
+         auto n_old_c = std::size(candidates_);
+@@ -553,7 +567,12 @@ Wishlist::Impl::Impl(Mediator& mediator_in)
+           // unrequested
+           mediator_in.observe_got_reject([this](tr_torrent*, tr_peer*, tr_block_index_t b) { reset_block(b); }),
+           // candidates
+-          mediator_in.observe_piece_completed([this](tr_torrent*, tr_piece_index_t p) { remove_piece(p); }),
++          mediator_in.observe_piece_completed(
++              [this](tr_torrent*, tr_piece_index_t p)
++              {
++                  remove_piece(p);
++                  refresh_window();
++              }),
+           // priority
+           mediator_in.observe_priority_changed([this](tr_torrent*, tr_file_index_t const*, tr_file_index_t, tr_priority_t)
+                                                { recalculate_priority(); }),
+@@ -569,6 +588,7 @@ Wishlist::Impl::Impl(Mediator& mediator_in)
+       } }
+     , mediator_{ mediator_in }
+ {
++    mediator_.refresh_piece_window();
+     candidate_list_upkeep();
+ }
+ 
+@@ -613,6 +633,11 @@ std::vector<tr_block_span_t> Wishlist::Impl::next(
+ 
+ int Wishlist::Impl::Candidate::compare(Candidate const& that) const noexcept
+ {
++    if (auto const val = tr_compare_3way(window, that.window); val != 0)
++    {
++        return val;
++    }
++
+     // prefer pieces closer to completion
+     if (auto const val = tr_compare_3way(std::size(unrequested), std::size(that.unrequested)); val != 0)
+     {
+diff --git a/libtransmission/peer-mgr-wishlist.h b/libtransmission/peer-mgr-wishlist.h
+index ae2f5fb..8c0e322 100644
+--- a/libtransmission/peer-mgr-wishlist.h
++++ b/libtransmission/peer-mgr-wishlist.h
+@@ -40,6 +40,15 @@ public:
+         [[nodiscard]] virtual tr_piece_index_t piece_count() const = 0;
+         [[nodiscard]] virtual tr_priority_t priority(tr_piece_index_t piece) const = 0;
+ 
++        virtual void refresh_piece_window()
++        {
++        }
++
++        [[nodiscard]] virtual int piece_window_rank(tr_piece_index_t) const
++        {
++            return 0;
++        }
++
+         [[nodiscard]] virtual libtransmission::ObserverTag observe_files_wanted_changed(
+             libtransmission::SimpleObservable<tr_torrent*, tr_file_index_t const*, tr_file_index_t, bool>::Observer) = 0;
+         [[nodiscard]] virtual libtransmission::ObserverTag observe_peer_disconnect(
+diff --git a/libtransmission/peer-mgr.cc b/libtransmission/peer-mgr.cc
+index 0aa4f8f..aff1583 100644
+--- a/libtransmission/peer-mgr.cc
++++ b/libtransmission/peer-mgr.cc
+@@ -54,6 +54,8 @@
+ #include "libtransmission/utils.h"
+ #include "libtransmission/values.h"
+ #include "libtransmission/webseed.h"
++#include "libtransmission/tv-io.h"
++#include "libtransmission/peer-socket.h"
+ 
+ using namespace std::literals;
+ using namespace libtransmission::Values;
+@@ -388,6 +390,8 @@ public:
+         [[nodiscard]] tr_block_span_t block_span(tr_piece_index_t piece) const override;
+         [[nodiscard]] tr_piece_index_t piece_count() const override;
+         [[nodiscard]] tr_priority_t priority(tr_piece_index_t piece) const override;
++        void refresh_piece_window() override;
++        [[nodiscard]] int piece_window_rank(tr_piece_index_t piece) const override;
+ 
+         [[nodiscard]] libtransmission::ObserverTag observe_files_wanted_changed(
+             libtransmission::SimpleObservable<tr_torrent*, tr_file_index_t const*, tr_file_index_t, bool>::Observer observer)
+@@ -425,6 +429,8 @@ public:
+     private:
+         tr_torrent& tor_;
+         tr_swarm& swarm_;
++        std::vector<uint64_t> file_frontier_;
++        uint64_t window_bytes_ = 0;
+     };
+ 
+     [[nodiscard]] auto unique_lock() const
+@@ -1008,6 +1014,59 @@ bool tr_swarm::WishlistMediator::client_has_block(tr_block_index_t block) const
+     return tor_.has_block(block);
+ }
+ 
++void tr_swarm::WishlistMediator::refresh_piece_window()
++{
++    window_bytes_ = tr_ioPieceWindowBytes();
++    file_frontier_.clear();
++    if (window_bytes_ == 0U || !tor_.has_metainfo())
++    {
++        return;
++    }
++
++    file_frontier_.assign(tor_.file_count(), 0U);
++    for (tr_piece_index_t piece = 0U, n = tor_.piece_count(); piece < n; ++piece)
++    {
++        if (!tor_.has_piece(piece))
++        {
++            continue;
++        }
++
++        auto const [file_index, file_offset] = tor_.file_offset(tor_.piece_loc(piece));
++        auto const end = std::min<uint64_t>(file_offset + tor_.piece_size(piece), tor_.file_size(file_index));
++        file_frontier_[file_index] = std::max(file_frontier_[file_index], end);
++    }
++}
++
++int tr_swarm::WishlistMediator::piece_window_rank(tr_piece_index_t piece) const
++{
++    if (window_bytes_ == 0U || file_frontier_.empty())
++    {
 +        return 0;
 +    }
 +
-     if (this->band_[dir].is_limited_)
-     {
-         byte_count = std::min(byte_count, this->band_[dir].bytes_left_);
-diff --git a/libtransmission/fdlimit.cc b/libtransmission/fdlimit.cc
-index 56fc9109..cf99c384 100644
---- a/libtransmission/fdlimit.cc
-+++ b/libtransmission/fdlimit.cc
-@@ -573,6 +573,11 @@ tr_socket_t tr_fdSocketCreate(tr_session* session, int domain, int type)
-     return s;
- }
- 
-+int tr_fdGetPeerSocketCount(tr_session const* session)
-+{
-+    return session->fdInfo != nullptr ? session->fdInfo->peerCount : 0;
++    auto const [file_index, file_offset] = tor_.file_offset(tor_.piece_loc(piece));
++    if (file_index >= std::size(file_frontier_))
++    {
++        return 0;
++    }
++
++    auto const frontier = file_frontier_[file_index];
++    if (file_offset <= frontier + window_bytes_)
++    {
++        return 0;
++    }
++
++    auto over = (file_offset - frontier) / window_bytes_;
++    auto rank = 1;
++    while (over > 1U)
++    {
++        over >>= 1U;
++        ++rank;
++    }
++
++    return rank;
 +}
 +
- tr_socket_t tr_fdSocketAccept(tr_session* s, tr_socket_t sockfd, tr_address* addr, tr_port* port)
+ bool tr_swarm::WishlistMediator::client_has_piece(tr_piece_index_t piece) const
  {
-     TR_ASSERT(tr_isSession(s));
-diff --git a/libtransmission/fdlimit.h b/libtransmission/fdlimit.h
-index 721e6ea3..4bd5cbad 100644
---- a/libtransmission/fdlimit.h
-+++ b/libtransmission/fdlimit.h
-@@ -73,6 +73,8 @@ void tr_fdTorrentClose(tr_session* session, int torrentId);
-  **********************************************************************/
- tr_socket_t tr_fdSocketCreate(tr_session* session, int domain, int type);
+     return tor_.has_blocks(block_span(piece));
+@@ -1226,6 +1285,11 @@ public:
  
-+int tr_fdGetPeerSocketCount(tr_session const* session);
+     HandshakeMediator handshake_mediator_;
+ 
++    void clear_outbound_candidates()
++    {
++        outbound_candidates_.clear();
++    }
 +
- tr_socket_t tr_fdSocketAccept(tr_session* session, tr_socket_t listening_sockfd, tr_address* addr, tr_port* port);
+ private:
+     void bandwidth_pulse();
+     void make_new_peer_connections();
+@@ -2816,6 +2880,11 @@ void tr_peerMgr::make_new_peer_connections()
+ {
+     using namespace connect_helpers;
  
- void tr_fdSocketClose(tr_session* session, tr_socket_t s);
-diff --git a/libtransmission/inout.cc b/libtransmission/inout.cc
-index ec3e398e..3311d0af 100644
---- a/libtransmission/inout.cc
-+++ b/libtransmission/inout.cc
-@@ -7,9 +7,14 @@
-  */
++    if (tr_ioSuspended())
++    {
++        return;
++    }
++
+     auto const lock = unique_lock();
  
- #include <algorithm>
+     // get the candidates if we need to
+@@ -2854,3 +2923,48 @@ void HandshakeMediator::set_utp_failed(tr_sha1_digest_t const& info_hash, tr_soc
+         }
+     }
+ }
++
++void tr_sessionClearPeerFailures(tr_session* session)
++{
++    auto const lock = session->unique_lock();
++
++    for (auto* const tor : session->torrents())
++    {
++        for (auto const& [socket_address, peer_info] : tor->swarm->connectable_pool)
++        {
++            peer_info->clear_connection_failures();
++        }
++
++        tor->swarm->manager->clear_outbound_candidates();
++    }
++}
++
++void tr_sessionGetPeerSocketStats(tr_session* session, int* sockets, int* limit, int* peers, int* handshakes)
++{
++    auto const lock = session->unique_lock();
++
++    *sockets = static_cast<int>(tr_peer_socket::open_count());
++    *limit = static_cast<int>(session->peerLimit());
++    *peers = 0;
++    *handshakes = 0;
++
++    tr_peerMgr const* manager = nullptr;
++    for (auto const* const tor : session->torrents())
++    {
++        manager = tor->swarm->manager;
++        *peers += static_cast<int>(tor->swarm->peerCount());
++
++        for (auto const& [socket_address, peer_info] : tor->swarm->connectable_pool)
++        {
++            if (peer_info->has_handshake())
++            {
++                ++*handshakes;
++            }
++        }
++    }
++
++    if (manager != nullptr)
++    {
++        *handshakes += static_cast<int>(std::size(manager->incoming_handshakes));
++    }
++}
+diff --git a/libtransmission/peer-mgr.h b/libtransmission/peer-mgr.h
+index 9bf19f5..09c5b47 100644
+--- a/libtransmission/peer-mgr.h
++++ b/libtransmission/peer-mgr.h
+@@ -340,6 +340,16 @@ public:
+         connection_attempted_at_ = value;
+     }
+ 
++    void clear_connection_failures() noexcept
++    {
++        num_consecutive_fruitless_ = {};
++        connection_attempted_at_ = {};
++        if (is_connectable_ && !*is_connectable_)
++        {
++            is_connectable_.reset();
++        }
++    }
++
+     constexpr void set_latest_piece_data_time(time_t value) noexcept
+     {
+         piece_data_at_ = value;
+diff --git a/libtransmission/peer-socket.h b/libtransmission/peer-socket.h
+index b0bd9ca..9f935c4 100644
+--- a/libtransmission/peer-socket.h
++++ b/libtransmission/peer-socket.h
+@@ -102,6 +102,11 @@ public:
+ 
+     [[nodiscard]] static bool limit_reached(tr_session const* session) noexcept;
+ 
++    [[nodiscard]] static size_t open_count() noexcept
++    {
++        return n_open_sockets.load();
++    }
++
+ private:
+     enum class Type : uint8_t
+     {
+diff --git a/libtransmission/platform.cc b/libtransmission/platform.cc
+index 30b894d..c5fa26c 100644
+--- a/libtransmission/platform.cc
++++ b/libtransmission/platform.cc
+@@ -338,7 +338,12 @@ std::string tr_getWebClientDir([[maybe_unused]] tr_session const* session)
+ 
+ std::string tr_getSessionIdDir()
+ {
+-#ifndef _WIN32
++#if defined(__ANDROID__)
++
++    char const* const tmp = getenv("TMP");
++    return std::string{ tmp != nullptr ? tmp : "/data/local/tmp" };
++
++#elif !defined(_WIN32)
+ 
+     return std::string{ "/tmp"sv };
+ 
+diff --git a/libtransmission/session.cc b/libtransmission/session.cc
+index 5368d8f..e8ea11d 100644
+--- a/libtransmission/session.cc
++++ b/libtransmission/session.cc
+@@ -59,6 +59,7 @@
+ #include "libtransmission/variant.h"
+ #include "libtransmission/version.h"
+ #include "libtransmission/web.h"
++#include "libtransmission/tv-io.h"
+ 
+ struct tr_ctor;
+ 
+@@ -159,6 +160,13 @@ void bandwidthGroupWrite(tr_session const* session, std::string_view config_dir)
+ 
+ void tr_session::update_bandwidth(tr_direction const dir)
+ {
++    if (dir == TR_DOWN && tr_ioDownloadThrottled())
++    {
++        top_bandwidth_.set_limited(dir, true);
++        top_bandwidth_.set_desired_speed(dir, Speed{ 1U, Speed::Units::Byps });
++        return;
++    }
++
+     if (auto const limit = active_speed_limit(dir); limit)
+     {
+         top_bandwidth_.set_limited(dir, limit->base_quantity() > 0U);
+@@ -1515,8 +1523,14 @@ void tr_session::closeImplPart2(std::promise<void>* closed_promise, std::chrono:
+     closed_promise->set_value();
+ }
+ 
++void tr_sessionRefreshDownloadLimit(tr_session* session)
++{
++    session->update_bandwidth(TR_DOWN);
++}
++
+ void tr_sessionClose(tr_session* session, size_t timeout_secs)
+ {
++    tr_ioShutdown();
+     TR_ASSERT(session != nullptr);
+     TR_ASSERT(!session->am_in_session_thread());
+ 
+diff --git a/libtransmission/session.h b/libtransmission/session.h
+index e4f4752..ab2d127 100644
+--- a/libtransmission/session.h
++++ b/libtransmission/session.h
+@@ -1254,6 +1254,7 @@ private:
+     friend class libtransmission::test::SessionTest;
+ 
+     friend bool tr_blocklistExists(tr_session const* session);
++    friend void tr_sessionRefreshDownloadLimit(tr_session* session);
+     friend bool tr_sessionGetAntiBruteForceEnabled(tr_session const* session);
+     friend bool tr_sessionIsPortForwardingEnabled(tr_session const* session);
+     friend bool tr_sessionIsRPCEnabled(tr_session const* session);
+diff --git a/libtransmission/tv-io.cc b/libtransmission/tv-io.cc
+new file mode 100644
+index 0000000..074a419
+--- /dev/null
++++ b/libtransmission/tv-io.cc
+@@ -0,0 +1,128 @@
 +#include <atomic>
- #include <cerrno>
- #include <cstdlib> /* bsearch() */
-+#include <cstdio>
- #include <cstring> /* memcmp() */
 +#include <chrono>
++#include <cstdio>
++#include <cstdlib>
 +#include <thread>
 +
- 
- #include "transmission.h"
- #include "cache.h" /* tr_cacheReadBlock() */
-@@ -18,6 +23,7 @@
- #include "fdlimit.h"
- #include "file.h"
- #include "inout.h"
-+#include "trevent.h"
- #include "log.h"
- #include "peer-common.h" /* MAX_BLOCK_SIZE */
- #include "stats.h" /* tr_statsFileCreated() */
-@@ -37,6 +43,117 @@ enum
-     TR_IO_WRITE
- };
- 
-+static std::atomic<bool> downloadThrottled{ false };
-+static std::atomic<bool> ioSuspended{ false };
-+static std::atomic<tr_session*> throttleSession{ nullptr };
-+static std::atomic<bool> monitorStarted{ false };
++#include "libtransmission/transmission.h"
 +
-+static uint64_t maxDirtyBytes()
++#include "libtransmission/session.h"
++#include "libtransmission/tv-io.h"
++
++namespace
 +{
-+    static uint64_t const value = []() {
-+        char const* env = getenv("TRANSMISSION_MAX_DIRTY_MB");
-+        long const mb = env != nullptr ? atol(env) : 32;
-+        return static_cast<uint64_t>(mb > 0 ? mb : 32) * 1048576;
-+    }();
++std::atomic<bool> download_throttled{ false };
++std::atomic<bool> io_suspended{ false };
++std::atomic<tr_session*> throttle_session{ nullptr };
++std::atomic<bool> monitor_started{ false };
++
++uint64_t env_megabytes(char const* name, long fallback, bool allow_zero)
++{
++    char const* const env = getenv(name);
++    long const mb = env != nullptr ? atol(env) : fallback;
++    if (mb > 0)
++    {
++        return static_cast<uint64_t>(mb) * 1048576U;
++    }
++    return allow_zero ? 0U : static_cast<uint64_t>(fallback) * 1048576U;
++}
++
++uint64_t max_dirty_bytes()
++{
++    static uint64_t const value = env_megabytes("TRANSMISSION_MAX_DIRTY_MB", 32, false);
 +    return value;
 +}
 +
-+static uint64_t readDirtyBytes()
++uint64_t read_dirty_bytes()
 +{
-+    FILE* f = fopen("/proc/meminfo", "r");
-+
++    FILE* const f = fopen("/proc/meminfo", "r");
 +    if (f == nullptr)
 +    {
 +        return 0;
@@ -108,14 +617,12 @@ index ec3e398e..3311d0af 100644
 +
 +    char line[128];
 +    uint64_t total = 0;
-+
 +    while (fgets(line, sizeof(line), f) != nullptr)
 +    {
 +        unsigned long long kb = 0;
-+
 +        if (sscanf(line, "Dirty: %llu kB", &kb) == 1 || sscanf(line, "Writeback: %llu kB", &kb) == 1)
 +        {
-+            total += kb * 1024;
++            total += kb * 1024U;
 +        }
 +    }
 +
@@ -123,327 +630,103 @@ index ec3e398e..3311d0af 100644
 +    return total;
 +}
 +
-+static void refreshDownloadLimit(void* vsession)
++void set_download_throttled(bool const throttled)
 +{
-+    tr_sessionRefreshDownloadLimit(static_cast<tr_session*>(vsession));
-+}
-+
-+static void setDownloadThrottled(bool throttled)
-+{
-+    tr_session* session = throttleSession.load();
-+
-+    if (session != nullptr && downloadThrottled.exchange(throttled) != throttled)
++    tr_session* const session = throttle_session.load();
++    if (session != nullptr && download_throttled.exchange(throttled) != throttled)
 +    {
-+        tr_runInEventThread(session, refreshDownloadLimit, session);
++        session->run_in_session_thread([session]() { tr_sessionRefreshDownloadLimit(session); });
 +    }
++}
 +}
 +
 +bool tr_ioDownloadThrottled()
 +{
-+    return downloadThrottled.load() || ioSuspended.load();
++    return download_throttled.load() || io_suspended.load();
 +}
 +
 +bool tr_ioSuspended()
 +{
-+    return ioSuspended.load();
++    return io_suspended.load();
 +}
 +
-+void tr_ioSetSuspended(bool suspended)
++void tr_ioSetSuspended(bool const suspended)
 +{
-+    ioSuspended = suspended;
++    io_suspended = suspended;
 +}
 +
 +void tr_ioShutdown()
 +{
-+    throttleSession = nullptr;
-+    downloadThrottled = false;
++    throttle_session = nullptr;
++    download_throttled = false;
 +}
 +
-+static void startDirtyMonitor(tr_session* session)
++void tr_ioStartDirtyMonitor(tr_session* const session)
 +{
-+    throttleSession = session;
++    throttle_session = session;
 +    bool expected = false;
-+
-+    if (!monitorStarted.compare_exchange_strong(expected, true))
++    if (!monitor_started.compare_exchange_strong(expected, true))
 +    {
 +        return;
 +    }
 +
-+    std::thread([]() {
-+        for (;;)
++    std::thread(
++        []()
 +        {
-+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-+
-+            if (throttleSession.load() == nullptr)
++            for (;;)
 +            {
-+                continue;
-+            }
++                std::this_thread::sleep_for(std::chrono::milliseconds(100));
++                if (throttle_session.load() == nullptr)
++                {
++                    continue;
++                }
 +
-+            uint64_t const dirty = readDirtyBytes();
-+
-+            if (dirty >= maxDirtyBytes())
-+            {
-+                setDownloadThrottled(true);
++                uint64_t const dirty = read_dirty_bytes();
++                if (dirty >= max_dirty_bytes())
++                {
++                    set_download_throttled(true);
++                }
++                else if (dirty < max_dirty_bytes() / 2U)
++                {
++                    set_download_throttled(false);
++                }
 +            }
-+            else if (dirty < maxDirtyBytes() / 2)
-+            {
-+                setDownloadThrottled(false);
-+            }
-+        }
-+    }).detach();
++        })
++        .detach();
 +}
 +
- /* returns 0 on success, or an errno on failure */
- static int readOrWriteBytes(
-     tr_session* session,
-@@ -139,6 +256,10 @@ static int readOrWriteBytes(
-                 tr_logAddTorErr(tor, "write failed for \"%s\": %s", file->name, error->message);
-                 tr_error_free(error);
-             }
-+            else
-+            {
-+                startDirtyMonitor(session);
-+            }
-         }
-         else if (ioMode == TR_IO_PREFETCH)
-         {
-diff --git a/libtransmission/inout.h b/libtransmission/inout.h
-index cb215fdb..ae219b68 100644
---- a/libtransmission/inout.h
-+++ b/libtransmission/inout.h
-@@ -13,6 +13,22 @@
- #endif
- 
- struct tr_torrent;
++uint64_t tr_ioPieceWindowBytes()
++{
++    static uint64_t const value = env_megabytes("TRANSMISSION_PIECE_WINDOW_MB", 16, true);
++    return value;
++}
+diff --git a/libtransmission/tv-io.h b/libtransmission/tv-io.h
+new file mode 100644
+index 0000000..a6caf29
+--- /dev/null
++++ b/libtransmission/tv-io.h
+@@ -0,0 +1,24 @@
++#pragma once
++
++#include <cstdint>
++
 +struct tr_session;
++struct tr_torrent;
 +
-+/* true while unsynced writes exceed the limit; the session caps the download rate meanwhile */
-+bool tr_ioDownloadThrottled();
++[[nodiscard]] bool tr_ioDownloadThrottled();
 +
-+void tr_ioShutdown();
-+
-+bool tr_ioSuspended();
++[[nodiscard]] bool tr_ioSuspended();
 +
 +void tr_ioSetSuspended(bool suspended);
++
++void tr_ioStartDirtyMonitor(tr_session* session);
++
++void tr_ioShutdown();
 +
 +void tr_sessionRefreshDownloadLimit(tr_session* session);
 +
 +void tr_sessionClearPeerFailures(tr_session* session);
 +
 +void tr_sessionGetPeerSocketStats(tr_session* session, int* sockets, int* limit, int* peers, int* handshakes);
- 
- /**
-  * @addtogroup file_io File IO
-diff --git a/libtransmission/peer-mgr.cc b/libtransmission/peer-mgr.cc
-index c3285bfc..51c599c5 100644
---- a/libtransmission/peer-mgr.cc
-+++ b/libtransmission/peer-mgr.cc
-@@ -28,7 +28,9 @@
- #include "clients.h"
- #include "completion.h"
- #include "crypto-utils.h"
-+#include "fdlimit.h"
- #include "handshake.h"
-+#include "inout.h"
- #include "log.h"
- #include "net.h"
- #include "peer-io.h"
-@@ -827,6 +829,77 @@ static tr_torrent const* weightTorrent;
- 
- static uint16_t const* weightReplication;
- 
-+static std::vector<uint64_t> weightFileFrontier;
 +
-+static uint64_t weightWindowBytes = 0;
-+
-+static uint64_t getPieceWindowBytes()
-+{
-+    static uint64_t const bytes = []() {
-+        char const* env = getenv("TRANSMISSION_PIECE_WINDOW_MB");
-+        long const mb = (env != nullptr) ? atol(env) : 16;
-+        return mb > 0 ? static_cast<uint64_t>(mb) * 1048576 : uint64_t{ 0 };
-+    }();
-+    return bytes;
-+}
-+
-+static void updatePieceWindow(tr_torrent const* tor)
-+{
-+    tr_info const* const inf = &tor->info;
-+    weightWindowBytes = getPieceWindowBytes();
-+    weightFileFrontier.clear();
-+
-+    if (weightWindowBytes == 0)
-+    {
-+        return;
-+    }
-+
-+    weightFileFrontier.assign(inf->fileCount, 0);
-+
-+    for (tr_piece_index_t i = 0; i < inf->pieceCount; ++i)
-+    {
-+        if (!tr_torrentPieceIsComplete(tor, i))
-+        {
-+            continue;
-+        }
-+
-+        tr_file_index_t fileIndex = 0;
-+        uint64_t fileOffset = 0;
-+        tr_ioFindFileLocation(tor, i, 0, &fileIndex, &fileOffset);
-+        uint64_t const end = std::min<uint64_t>(fileOffset + inf->pieceSize, inf->files[fileIndex].length);
-+        weightFileFrontier[fileIndex] = std::max(weightFileFrontier[fileIndex], end);
-+    }
-+}
-+
-+static int pieceWindowRank(tr_torrent const* tor, tr_piece_index_t piece)
-+{
-+    if (weightWindowBytes == 0 || weightFileFrontier.empty())
-+    {
-+        return 0;
-+    }
-+
-+    tr_file_index_t fileIndex = 0;
-+    uint64_t fileOffset = 0;
-+    tr_ioFindFileLocation(tor, piece, 0, &fileIndex, &fileOffset);
-+    uint64_t const frontier = weightFileFrontier[fileIndex];
-+
-+    if (fileOffset <= frontier + weightWindowBytes)
-+    {
-+        return 0;
-+    }
-+
-+    uint64_t over = (fileOffset - frontier) / weightWindowBytes;
-+    int rank = 1;
-+
-+    while (over > 1)
-+    {
-+        over >>= 1;
-+        ++rank;
-+    }
-+
-+    return rank;
-+}
-+
- static void setComparePieceByWeightTorrent(tr_swarm* s)
- {
-     if (!replicationExists(s))
-@@ -836,6 +909,7 @@ static void setComparePieceByWeightTorrent(tr_swarm* s)
- 
-     weightTorrent = s->tor;
-     weightReplication = s->pieceReplication;
-+    updatePieceWindow(s->tor);
- }
- 
- /* we try to create a "weight" s.t. high-priority pieces come before others,
-@@ -847,6 +921,14 @@ static int comparePieceByWeight(void const* va, void const* vb)
-     tr_torrent const* const tor = weightTorrent;
-     uint16_t const* const rep = weightReplication;
- 
-+    int const windowA = pieceWindowRank(tor, a->index);
-+    int const windowB = pieceWindowRank(tor, b->index);
-+
-+    if (windowA != windowB)
-+    {
-+        return windowA < windowB ? -1 : 1;
-+    }
-+
-     /* primary key: weight */
-     int missing = tr_torrentMissingBlocksInPiece(tor, a->index);
-     int pending = a->requestCount;
-@@ -2126,6 +2208,36 @@ void tr_peerMgrAddIncoming(tr_peerMgr* manager, tr_address* addr, tr_port port,
-     managerUnlock(manager);
- }
- 
-+void tr_sessionClearPeerFailures(tr_session* session)
-+{
-+    for (auto* tor : session->torrents)
-+    {
-+        auto atomCount = int{};
-+        struct peer_atom** atoms = (struct peer_atom**)tr_ptrArrayPeek(&tor->swarm->pool, &atomCount);
-+
-+        for (int i = 0; i < atomCount; ++i)
-+        {
-+            atoms[i]->numFails = 0;
-+            atoms[i]->flags2 &= ~MYFLAG_UNREACHABLE;
-+            atoms[i]->time = 0;
-+        }
-+    }
-+}
-+
-+void tr_sessionGetPeerSocketStats(tr_session* session, int* sockets, int* limit, int* peers, int* handshakes)
-+{
-+    *sockets = tr_fdGetPeerSocketCount(session);
-+    *limit = tr_sessionGetPeerLimit(session);
-+    *peers = 0;
-+    *handshakes = session->peerMgr != nullptr ? tr_ptrArraySize(&session->peerMgr->incomingHandshakes) : 0;
-+
-+    for (auto const* tor : session->torrents)
-+    {
-+        *peers += tr_ptrArraySize(&tor->swarm->peers);
-+        *handshakes += tr_ptrArraySize(&tor->swarm->outgoingHandshakes);
-+    }
-+}
-+
- void tr_peerMgrSetSwarmIsAllSeeds(tr_torrent* tor)
- {
-     tr_torrentLock(tor);
-@@ -4284,6 +4396,11 @@ static void initiateCandidateConnection(tr_peerMgr* mgr, struct peer_candidate*
- 
- static void makeNewPeerConnections(struct tr_peerMgr* mgr, int const max)
- {
-+    if (tr_ioSuspended())
-+    {
-+        return;
-+    }
-+
-     auto n = int{};
-     struct peer_candidate* candidates = getPeerCandidates(mgr->session, &n, max);
- 
-diff --git a/libtransmission/session.cc b/libtransmission/session.cc
-index 944f46fa..c355e44e 100644
---- a/libtransmission/session.cc
-+++ b/libtransmission/session.cc
-@@ -62,6 +62,7 @@
- #endif
- 
- #include "tr-lpd.h"
-+#include "inout.h"
- #include "trevent.h"
- #include "utils.h"
- #include "variant.h"
-@@ -1509,7 +1510,14 @@ bool tr_sessionGetActiveSpeedLimit_KBps(tr_session const* session, tr_direction
- static void updateBandwidth(tr_session* session, tr_direction dir)
- {
-     unsigned int limit_Bps = 0;
--    bool const isLimited = tr_sessionGetActiveSpeedLimit_Bps(session, dir, &limit_Bps);
-+    bool isLimited = tr_sessionGetActiveSpeedLimit_Bps(session, dir, &limit_Bps);
-+
-+    if (dir == TR_DOWN && tr_ioDownloadThrottled())
-+    {
-+        isLimited = true;
-+        limit_Bps = 1;
-+    }
-+
-     bool const zeroCase = isLimited && limit_Bps == 0;
- 
-     session->bandwidth->setLimited(dir, isLimited && !zeroCase);
-@@ -1517,6 +1525,11 @@ static void updateBandwidth(tr_session* session, tr_direction dir)
-     session->bandwidth->setDesiredSpeedBytesPerSecond(dir, limit_Bps);
- }
- 
-+void tr_sessionRefreshDownloadLimit(tr_session* session)
-+{
-+    updateBandwidth(session, TR_DOWN);
-+}
-+
- enum
- {
-     MINUTES_PER_HOUR = 60,
-@@ -2092,6 +2105,8 @@ void tr_sessionClose(tr_session* session)
- {
-     TR_ASSERT(tr_isSession(session));
- 
-+    tr_ioShutdown();
-+
-     time_t const deadline = time(nullptr) + SHUTDOWN_MAX_SECONDS;
- 
-     dbgmsg(
++[[nodiscard]] uint64_t tr_ioPieceWindowBytes();

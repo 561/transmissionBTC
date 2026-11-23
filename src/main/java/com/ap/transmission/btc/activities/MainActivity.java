@@ -23,6 +23,7 @@ import android.widget.EditText;
 
 import com.ap.transmission.btc.BindingHelper;
 import com.ap.transmission.btc.Prefs;
+import com.ap.transmission.btc.services.TransmissionService;
 import com.ap.transmission.btc.R;
 import com.ap.transmission.btc.Utils;
 import com.ap.transmission.btc.databinding.MainBinding;
@@ -121,6 +122,8 @@ public class MainActivity extends ActivityBase {
 			checkPermission(perms.toArray(new String[perms.size()]));
 			findViewById(R.id.button_start_stop).requestFocus();
 		}
+
+		if (getIntent().getBooleanExtra("start", false)) TransmissionService.start(this, null);
 	}
 
 	@Override

@@ -75,6 +75,7 @@ public class BindingHelper implements OnSharedPreferenceChangeListener, Runnable
     isServiceRunning = 2;
 
     if (running) {
+      activity.getPrefs().putBoolean(Prefs.K.WAS_RUNNING, false);
       TransmissionService.stop(activity, callback);
     } else {
       TransmissionService.start(activity, callback);

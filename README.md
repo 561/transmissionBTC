@@ -8,6 +8,11 @@ Built and tested on a Google TV Streamer (Android 14, 32-bit ARM) downloading to
 
 ## What this fork adds
 
+### Transmission 4.1.4 engine
+* Built on upstream Transmission 4.1.4 instead of the 2021 pre-4.0 snapshot: uTP, default trackers (`default-trackers` in the session settings, added to every public torrent), native sequential download for streaming.
+* Needs Android 8.0+ (minSdk 26) and the NDK r26 toolchain; preallocation is forced off because the 4.x default (sparse) zero-fills on exFAT.
+* The app starts the service again after an update if it was running before, and `adb shell am start -n com.ap.transmission.btc.fork/com.ap.transmission.btc.activities.MainActivity --ez start true` starts it without touching the remote.
+
 ### Downloads only when the TV is idle
 * New setting **"Download only when idle (screensaver or screen off)"**.
 * Downloading starts when the screensaver or screen-off begins and pauses within seconds when someone uses the TV, so playback and navigation never compete with the flash drive.
@@ -26,7 +31,7 @@ Built and tested on a Google TV Streamer (Android 14, 32-bit ARM) downloading to
 * **No preallocation.** Android's exFAT FUSE layer zero-fills when a file is extended, which blocks the drive for minutes on multi-GB files.
 * **Dirty-page throttle.** A 100 ms monitor reads `Dirty + Writeback` from `/proc/meminfo`. At 16 MB (configurable with `TRANSMISSION_MAX_DIRTY_MB`) downloading is throttled immediately inside `Bandwidth::clamp`, and released below half of that. This keeps the kernel write queue short, so the engine and web UI never wait on the drive.
 * **Piece window.** Pieces more than 16 MiB (`TRANSMISSION_PIECE_WINDOW_MB`) ahead of the written data are requested last, so a write never lands far beyond the end of the file and exFAT has no big gap to zero-fill.
-* The engine changes live in [`patches/transmission-engine.patch`](patches/transmission-engine.patch), applied on top of Transmission 3.00.
+* The engine changes live in [`patches/transmission-engine.patch`](patches/transmission-engine.patch), applied on top of Transmission 4.1.4 (fetched by the native build).
 
 ### Reliability
 * **Peer watchdog:** if a downloading torrent has no peers for a minute, it is re-announced to its trackers (and again at most once a minute). Transmission by default only re-announces every 30-60 minutes.

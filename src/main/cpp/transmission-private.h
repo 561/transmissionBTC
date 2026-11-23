@@ -2,18 +2,12 @@
 #define TRANSMISSION_PRIVATE_H
 #define __TRANSMISSION__
 
-#ifndef NDEBUG
-#define NDEBUG
-#include <libtransmission/tr-assert.h>
-#undef NDEBUG
-#else
-#include <libtransmission/tr-assert.h>
-#endif
-
-#include <libtransmission/trevent.h>
-#include <libtransmission/session.h>
+#include <libtransmission/transmission.h>
 #include <libtransmission/cache.h>
-#include <libtransmission/peer-mgr.h>
+#include <libtransmission/crypto-utils.h>
+#include <libtransmission/session.h>
 #include <libtransmission/torrent.h>
+#include <libtransmission/torrent-metainfo.h>
+#include <libtransmission/tv-io.h>
 
 #endif

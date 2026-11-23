@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.4.1)
+cmake_minimum_required(VERSION 3.16.3)
 project(transmissionbtc)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -65,6 +65,8 @@ include_directories(SYSTEM
         ${CURL_INCLUDE_DIR}
         ${EVENT_INCLUDE_DIR}
         ${TR_INCLUDE_DIR})
+
+target_compile_definitions(${PROJECT_NAME} PRIVATE ${TR_DEFINITIONS})
 
 target_link_libraries(${PROJECT_NAME}
         ${TR_LIBRARIES}

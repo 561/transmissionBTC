@@ -65,11 +65,11 @@ size_t cp(JNIEnv *env, const char *fromPath, const char *toPath) {
 }
 
 tr_ctor *ctorFromFile(JNIEnv *env, jlong jsession, jstring jpath, bool throwErr) {
-	const tr_session *session = (const tr_session *) jsession;
+	tr_session *session = (tr_session *) jsession;
 	const char *path = env->GetStringUTFChars(jpath, 0);
 	tr_ctor *ctor = tr_ctorNew(session);
 
-	if (tr_ctorSetMetainfoFromFile(ctor, path)) {
+	if (!tr_ctorSetMetainfoFromFile(ctor, path, nullptr)) {
 		tr_ctorFree(ctor);
 		ctor = NULL;
 		throwOrLog(env, CLASS_IOEX, throwErr, "Invalid torrent file: %s", path);
@@ -80,35 +80,18 @@ tr_ctor *ctorFromFile(JNIEnv *env, jlong jsession, jstring jpath, bool throwErr)
 	return ctor;
 }
 
-tr_parse_result
-infoFromFile(JNIEnv *env, jlong jsession, jstring jpath, tr_info *info, bool throwErr) {
-	const char *path = NULL;
-	tr_parse_result result = TR_PARSE_ERR;
-	tr_ctor *ctor = ctorFromFileEx(env, jsession, jpath);
-	result = tr_torrentParse(ctor, info);
-	tr_ctorFree(ctor);
-
-	if (result != TR_PARSE_OK) {
-		path = env->GetStringUTFChars(jpath, 0);
-		throwOrLog(env, CLASS_IOEX, throwErr, "Failed to parse torrent file: %s", path);
-	}
-
-	CATCH:
-	if (path != NULL) env->ReleaseStringUTFChars(jpath, path);
-	return result;
-}
-
-int findTorrentByHash(tr_session *session, uint8_t *hash, Err *err) {
-	tr_torrent *tor = tr_torrentFindFromHash(session, hash);
+void *findTorrentByHash(tr_session *session, void *hash, Err *err) {
+	tr_sha1_digest_t digest;
+	memcpy(digest.data(), hash, SHA_DIGEST_LENGTH);
+	tr_torrent *tor = session->torrents().get(digest);
 
 	if (tor == NULL) {
-		char hashString[1 + 2 * SHA_DIGEST_LENGTH];
-		tr_binary_to_hex(hash, hashString, SHA_DIGEST_LENGTH);
-		err->set(err, CLASS_NSTEX, "No such torrent: hash=%s", hashString);
-		return -1;
+		auto const hashString = tr_sha1_to_string(digest);
+		err->set(err, CLASS_NSTEX, "No such torrent: hash=%s", hashString.c_str());
+		return (void *) (intptr_t) -1;
 	}
 
-	return tr_torrentId(tor);
+	return (void *) (intptr_t) tr_torrentId(tor);
 }
 
 tr_torrent *findTorrentById(tr_session *session, int id, Err *err) {
@@ -117,24 +100,21 @@ tr_torrent *findTorrentById(tr_session *session, int id, Err *err) {
 	return tor;
 }
 
-const tr_file *getFileInfo(tr_torrent *tor, uint32_t idx, Err *err) {
-	const tr_info *info = tr_torrentInfo(tor);
-	if (idx >= info->fileCount) {
+bool checkFileIndex(tr_torrent *tor, uint32_t idx, bool wanted, Err *err) {
+	if (idx >= tr_torrentFileCount(tor)) {
 		err->set(err, CLASS_IAEX, "Invalid file index: %d", idx);
-		return NULL;
-	} else {
-		return &info->files[idx];
+		return false;
 	}
-}
 
-const tr_file *getWantedFileInfo(tr_torrent *tor, uint32_t idx, Err *err) {
-	const tr_file *f = getFileInfoEx(tor, idx, err);
-	if (f->dnd != 0) {
-		err->set(err, CLASS_IAEX, "File #%d is unwanted for download: %s", idx, f->name);
-		return NULL;
+	if (wanted) {
+		tr_file_view const f = tr_torrentFile(tor, idx);
+		if (!f.wanted) {
+			err->set(err, CLASS_IAEX, "File #%d is unwanted for download: %s", idx, f.name);
+			return false;
+		}
 	}
-	CATCH:
-	return f;
+
+	return true;
 }
 
 struct Future {
@@ -187,7 +167,7 @@ void *runInTransmissionThread(const char *file, int line, JNIEnv *env, jlong jse
 	f.err.set = setError;
 	f.func = func;
 
-	tr_runInEventThread(f.session, runInEventThread, &f);
+	f.session->run_in_session_thread(runInEventThread, &f);
 	while ((sem_wait(sem) == -1) && (errno == EINTR));
 	sem_destroy(sem);
 

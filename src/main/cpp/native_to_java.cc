@@ -3,6 +3,7 @@
 #include "commons.h"
 #include "native_to_java.h"
 #include "libtransmission/file.h"
+#include "libtransmission/utils.h"
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wconversion"
@@ -39,6 +40,7 @@ static void rndChars(char *str, int num);
 
 JNIEXPORT void JNICALL
 Java_com_ap_transmission_btc_Native_nativeToJavaInit(JNIEnv *env, jclass c) {
+  tr_lib_init();
   env->GetJavaVM(&jvm);
   jclass sa = env->FindClass("com/ap/transmission/btc/StorageAccess");
   classNative = (jclass) env->NewGlobalRef(c);
@@ -101,7 +103,7 @@ tr_sys_file_t tr_android_file_open(char const *path, int flags) {
   int fd = -1;
 {
   JvmAttach();
-  jboolean create = (flags & (TR_SYS_FILE_CREATE | TR_SYS_FILE_CREATE_NEW)) ? JNI_TRUE : JNI_FALSE;
+  jboolean create = (flags & (TR_SYS_FILE_CREATE | TR_SYS_FILE_CREATE)) ? JNI_TRUE : JNI_FALSE;
   jboolean writable = JNI_TRUE;
   jboolean truncate = (flags & TR_SYS_FILE_TRUNCATE) ? JNI_TRUE : JNI_FALSE;
   jstring jpath = env->NewStringUTF(path);
@@ -119,7 +121,7 @@ tr_sys_file_t tr_android_file_open_temp(char *path_template) {
   for (int i = 0; i < 100; i++) {
     rndChars(suffix, 6);
     if (access(path_template, F_OK) == -1) {
-      return tr_android_file_open(path_template, TR_SYS_FILE_CREATE_NEW);
+      return tr_android_file_open(path_template, TR_SYS_FILE_CREATE);
     }
   }
 

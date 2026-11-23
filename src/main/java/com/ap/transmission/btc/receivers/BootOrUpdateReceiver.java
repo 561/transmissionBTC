@@ -46,7 +46,7 @@ public class BootOrUpdateReceiver extends BroadcastReceiver {
         start(context, null);
       }
     } else if (ACTION_MY_PACKAGE_REPLACED.equals(a)) {
-      if (p.isStartOnBoot()) start(context, null);
+      if (p.isStartOnBoot() || p.getBoolean(Prefs.K.WAS_RUNNING)) start(context, null);
     }
   }
 }

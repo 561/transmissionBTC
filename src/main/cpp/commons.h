@@ -9,7 +9,6 @@
 #include <semaphore.h>
 #include <android/log.h>
 #include <libtransmission/transmission.h>
-#include <libtransmission/utils.h>
 
 extern "C" {
 
@@ -40,33 +39,19 @@ jint throwException(const char *, int, JNIEnv *, const char *, const char *, ...
 
 size_t cp(JNIEnv *env, const char *, const char *);
 
-#define ctorFromFileEx(env, jsession, jpath) \
-  ctorFromFile(env, jsession, jpath, true); \
-  if (env->ExceptionCheck()) goto CATCH
+#define SHA_DIGEST_LENGTH 20
 
 tr_ctor *ctorFromFile(JNIEnv *, jlong, jstring, bool);
 
-#define infoFromFileEx(env, jsession, jpath, info) \
-  if ((infoFromFile(env, jsession, jpath, info, true) != TR_PARSE_OK) || env->ExceptionCheck()) \
-    goto CATCH
-
-tr_parse_result infoFromFile(JNIEnv *, jlong, jstring, tr_info *, bool);
-
-#define findTorrentByHashFunc ((void *(*)(tr_session *, void *, Err *)) findTorrentByHash)
-
-int findTorrentByHash(tr_session *session, uint8_t *hash, Err *err);
+void *findTorrentByHash(tr_session *session, void *hash, Err *err);
 
 #define findTorrentByIdEx(session, id, err) findTorrentById(session,  id, err); errCheck(err)
 
 tr_torrent *findTorrentById(tr_session *session, int id, Err *err);
 
-#define getFileInfoEx(tor, idx, err) getFileInfo(tor, idx, err); errCheck(err)
+bool checkFileIndex(tr_torrent *tor, uint32_t idx, bool wanted, Err *err);
 
-const tr_file *getFileInfo(tr_torrent *tor, uint32_t idx, Err *err);
-
-#define getWantedFileInfoEx(tor, idx, err) getWantedFileInfo(tor, idx, err); errCheck(err)
-
-const tr_file *getWantedFileInfo(tr_torrent *tor, uint32_t idx, Err *err);
+void torrentMetadataReceived(tr_torrent *tor);
 
 #define runInTransmissionThreadEx(env, jsession, func, data) \
   runInTransmissionThread(__FILENAME__, __LINE__, env, jsession, func, data);\

@@ -130,6 +130,7 @@ public class TransmissionService extends Service {
   public int onStartCommand(Intent intent, int flags, int startId) {
     if (!isRunning()) {
       Log.i(TAG, "Start command received");
+      new Prefs(getApplicationContext()).putBoolean(Prefs.K.WAS_RUNNING, true);
       Notification n = buildNotification(getApplicationContext(), false);
       startForeground(NOTIFICATION_ID, n);
       runOnStart(TransmissionService::updateNotification);

@@ -51,6 +51,7 @@ public class Prefs {
     PREV_DOWNLOAD_DIR(Prefs::getDownloadDir),
     WATCH_DIR(Prefs::getDefaultWatchDir),
     START_ON_BOOT(false),
+    WAS_RUNNING(false),
     BOOT_DELAY(0),
     ENABLE_WATCH_DIR(false),
     WATCH_INTERVAL(0),
